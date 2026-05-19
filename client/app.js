@@ -2,31 +2,39 @@
   "use strict";
 
   var DEFAULT_WS_URL = "ws://localhost:3000/ws/audio";
-  var AUDIO_MIME_TYPE = "audio/webm;codecs=opus";
-  var CHUNK_TIMESLICE_MS = 250;
+  var DEFAULT_TARGET_SAMPLE_RATE = 16000;
+  var DEFAULT_FRAME_DURATION_MS = 100;
+  var WORKLET_URL = "./audio-worklet.js";
   var MAX_BUFFERED_BYTES = 1024 * 1024;
 
   var config = window.VOICE_AI_CONFIG || {};
   var websocketUrl = config.WS_URL || DEFAULT_WS_URL;
+  var targetSampleRate = config.TARGET_SAMPLE_RATE || DEFAULT_TARGET_SAMPLE_RATE;
+  var frameDurationMs = config.FRAME_DURATION_MS || DEFAULT_FRAME_DURATION_MS;
 
   var startButton = document.getElementById("startButton");
   var stopButton = document.getElementById("stopButton");
   var connectionStatus = document.getElementById("connectionStatus");
   var recordingStatus = document.getElementById("recordingStatus");
   var endpointValue = document.getElementById("endpointValue");
+  var formatValue = document.getElementById("formatValue");
   var chunksSent = document.getElementById("chunksSent");
   var bytesSent = document.getElementById("bytesSent");
   var errorMessage = document.getElementById("errorMessage");
 
   var socket = null;
   var mediaStream = null;
-  var recorder = null;
+  var audioContext = null;
+  var sourceNode = null;
+  var workletNode = null;
+  var muteNode = null;
   var isStarting = false;
   var stopRequested = false;
   var chunkCount = 0;
   var byteCount = 0;
 
   endpointValue.textContent = websocketUrl;
+  formatValue.textContent = "PCM16 mono, " + targetSampleRate + " Hz";
 
   startButton.addEventListener("click", function () {
     startStreaming().catch(handleFatalStartError);
@@ -43,7 +51,7 @@
   updateControls();
 
   async function startStreaming() {
-    if (isStarting || recorder) {
+    if (isStarting || audioContext) {
       return;
     }
 
@@ -68,6 +76,7 @@
 
       mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
+          channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true
@@ -78,13 +87,14 @@
         return;
       }
 
-      recorder = new MediaRecorder(mediaStream, {
-        mimeType: AUDIO_MIME_TYPE
-      });
-      recorder.addEventListener("dataavailable", handleAudioChunk);
-      recorder.addEventListener("error", handleRecorderError);
-      recorder.start(CHUNK_TIMESLICE_MS);
+      await setupAudioPipeline();
+      if (stopRequested) {
+        await stopStreaming("Stopped");
+        return;
+      }
 
+      sendStartMessage();
+      connectAudioGraph();
       setStatus(recordingStatus, "Recording", "recording");
     } catch (error) {
       var wasStopped = stopRequested;
@@ -102,13 +112,31 @@
     stopRequested = true;
     setStatus(recordingStatus, "Stopping", "stopping");
 
-    if (recorder) {
-      recorder.removeEventListener("dataavailable", handleAudioChunk);
-      recorder.removeEventListener("error", handleRecorderError);
-      if (recorder.state !== "inactive") {
-        recorder.stop();
+    if (workletNode) {
+      workletNode.port.postMessage({ type: "stop" });
+      workletNode.port.removeEventListener("message", handleWorkletMessage);
+      workletNode.port.removeEventListener("messageerror", handleWorkletMessageError);
+      workletNode.removeEventListener("processorerror", handleWorkletProcessorError);
+      workletNode.disconnect();
+      workletNode.port.close();
+      workletNode = null;
+    }
+
+    if (sourceNode) {
+      sourceNode.disconnect();
+      sourceNode = null;
+    }
+
+    if (muteNode) {
+      muteNode.disconnect();
+      muteNode = null;
+    }
+
+    if (audioContext) {
+      if (audioContext.state !== "closed") {
+        await audioContext.close();
       }
-      recorder = null;
+      audioContext = null;
     }
 
     if (mediaStream) {
@@ -132,6 +160,8 @@
   }
 
   function assertBrowserSupport() {
+    var AudioContextClass = window.AudioContext || window.webkitAudioContext;
+
     if (!window.WebSocket) {
       throw new Error("This browser does not support WebSockets.");
     }
@@ -140,13 +170,67 @@
       throw new Error("This browser cannot access microphone input.");
     }
 
-    if (!window.MediaRecorder) {
-      throw new Error("This browser does not support MediaRecorder.");
+    if (!AudioContextClass) {
+      throw new Error("This browser does not support Web Audio.");
+    }
+  }
+
+  async function setupAudioPipeline() {
+    var AudioContextClass = window.AudioContext || window.webkitAudioContext;
+
+    try {
+      audioContext = new AudioContextClass({
+        sampleRate: targetSampleRate
+      });
+    } catch (error) {
+      audioContext = new AudioContextClass();
     }
 
-    if (!MediaRecorder.isTypeSupported(AUDIO_MIME_TYPE)) {
-      throw new Error("This browser cannot record " + AUDIO_MIME_TYPE + ".");
+    if (!audioContext.audioWorklet) {
+      throw new Error("This browser does not support AudioWorklet.");
     }
+
+    await audioContext.audioWorklet.addModule(WORKLET_URL);
+
+    sourceNode = audioContext.createMediaStreamSource(mediaStream);
+    workletNode = new AudioWorkletNode(audioContext, "pcm16-stream-processor", {
+      processorOptions: {
+        targetSampleRate: targetSampleRate,
+        frameDurationMs: frameDurationMs
+      }
+    });
+    muteNode = audioContext.createGain();
+    muteNode.gain.value = 0;
+
+    workletNode.port.addEventListener("message", handleWorkletMessage);
+    workletNode.port.addEventListener("messageerror", handleWorkletMessageError);
+    workletNode.addEventListener("processorerror", handleWorkletProcessorError);
+    workletNode.port.start();
+
+    if (audioContext.state === "suspended") {
+      await audioContext.resume();
+    }
+  }
+
+  function connectAudioGraph() {
+    sourceNode.connect(workletNode);
+    workletNode.connect(muteNode);
+    muteNode.connect(audioContext.destination);
+  }
+
+  function sendStartMessage() {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error("WebSocket is not open.");
+    }
+
+    socket.send(JSON.stringify({
+      type: "start",
+      format: "pcm_s16le",
+      sampleRate: targetSampleRate,
+      inputSampleRate: audioContext.sampleRate,
+      channels: 1,
+      frameDurationMs: frameDurationMs
+    }));
   }
 
   function openWebSocket(url) {
@@ -208,8 +292,18 @@
     activeSocket.removeEventListener("error", handleSocketError);
   }
 
-  function handleAudioChunk(event) {
-    if (!event.data || event.data.size === 0) {
+  function handleWorkletMessage(event) {
+    var message = event.data;
+
+    if (!message || message.type !== "pcm" || !(message.buffer instanceof ArrayBuffer)) {
+      return;
+    }
+
+    sendPcmFrame(message.buffer);
+  }
+
+  function sendPcmFrame(buffer) {
+    if (stopRequested) {
       return;
     }
 
@@ -226,9 +320,9 @@
     }
 
     try {
-      socket.send(event.data);
+      socket.send(buffer);
       chunkCount += 1;
-      byteCount += event.data.size;
+      byteCount += buffer.byteLength;
       chunksSent.textContent = String(chunkCount);
       bytesSent.textContent = formatBytes(byteCount);
     } catch (error) {
@@ -251,10 +345,14 @@
     }
   }
 
-  function handleRecorderError(event) {
-    var message = event.error ? event.error.message : "MediaRecorder error.";
+  function handleWorkletMessageError() {
     stopStreaming("Stopped");
-    showError(message);
+    showError("Audio worklet message failed.");
+  }
+
+  function handleWorkletProcessorError() {
+    stopStreaming("Stopped");
+    showError("Audio worklet processing failed.");
   }
 
   function handleFatalStartError(error) {
@@ -270,8 +368,8 @@
   }
 
   function updateControls() {
-    startButton.disabled = isStarting || Boolean(recorder);
-    stopButton.disabled = !isStarting && !recorder && !socket && !mediaStream;
+    startButton.disabled = isStarting || Boolean(audioContext);
+    stopButton.disabled = !isStarting && !audioContext && !socket && !mediaStream;
   }
 
   function setStatus(element, text, state) {
