@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Voice AI Client</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="app-shell" aria-labelledby="app-title">
+      <section class="stream-panel">
+        <header class="masthead">
+          <p class="eyebrow">Voice AI Client</p>
+          <h1 id="app-title">Audio Stream</h1>
+        </header>
+
+        <dl class="status-grid" aria-live="polite">
+          <div class="status-item">
+            <dt>Connection</dt>
+            <dd id="connectionStatus" data-state="idle">Idle</dd>
+          </div>
+          <div class="status-item">
+            <dt>Recording</dt>
+            <dd id="recordingStatus" data-state="idle">Idle</dd>
+          </div>
+          <div class="status-item wide">
+            <dt>Endpoint</dt>
+            <dd id="endpointValue">Not configured</dd>
+          </div>
+          <div class="status-item">
+            <dt>Chunks</dt>
+            <dd id="chunksSent">0</dd>
+          </div>
+          <div class="status-item">
+            <dt>Sent</dt>
+            <dd id="bytesSent">0 B</dd>
+          </div>
+        </dl>
+
+        <div class="controls">
+          <button id="startButton" class="button primary" type="button">Start</button>
+          <button id="stopButton" class="button" type="button" disabled>Stop</button>
+        </div>
+
+        <p id="errorMessage" class="error-message" role="alert" hidden></p>
+      </section>
+    </main>
+
+    <script src="./config.js"></script>
+    <script src="./app.js" defer></script>
+  </body>
+</html>
