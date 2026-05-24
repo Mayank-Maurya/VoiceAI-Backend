@@ -1,6 +1,8 @@
 import http from "node:http";
 import { WebSocketServer } from "ws";
 import { addConnection, handleAudio, removeConnection } from "./connectionManager";
+import dotenv from "dotenv";
+dotenv.config();
 const WS_PATH = "/ws/audio";
 const PORT = 3000;
 

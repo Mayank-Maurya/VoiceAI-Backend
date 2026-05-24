@@ -1,6 +1,8 @@
 import { ClientSession } from "./types";
 import crypto from "node:crypto";
 import { RawData, WebSocket } from "ws";
+import { RingBuffer } from "./staticRingBuffer";
+import { sendToVadModel } from "./vad";
 
 const sessions = new Map<string, ClientSession>();
 
@@ -11,7 +13,9 @@ export function addConnection(socket: WebSocket): ClientSession {
         connectedAt: Date.now(),
         lastChunkAt: 0,
         chunksRecieved: 0,
-        bytesRecieved: 0
+        bytesRecieved: 0,
+        vadFramesSent: 0,
+        vadBuffer: new RingBuffer(),
     };
 
     sessions.set(session.id, session);
@@ -25,10 +29,12 @@ export function addConnection(socket: WebSocket): ClientSession {
 
 export function removeConnection(session: ClientSession): void {
   sessions.delete(session.id);
+  session.vadBuffer.clear();
 
   console.log(
     `[${session.id}] disconnected activeConnections=${sessions.size} ` +
-      `chunks=${session.chunksRecieved} totalBytes=${session.bytesRecieved}`
+      `chunks=${session.chunksRecieved} totalBytes=${session.bytesRecieved}` + 
+      `vadFrames=${session.vadFramesSent}`
   );
 }
 
@@ -38,43 +44,34 @@ export function handleAudio(session: ClientSession, data: RawData, isBinary: boo
         return;
     }
 
-    const now = Date.now();
-    const chunkSize = getChunkSize(data);
-    const sinceConnectedMs = now - session.connectedAt;
-    const sinceLastChunkMs =
-        session.lastChunkAt === 0 ? 0 : now - session.lastChunkAt;
+    const audioChunk = toBuffer(data);
 
-    session.lastChunkAt = now;
     session.chunksRecieved += 1;
-    session.bytesRecieved += chunkSize;
+    session.bytesRecieved += audioChunk.length;
 
-    console.log(
-        `[${session.id}] chunk=${session.chunksRecieved} ` +
-        `size=${chunkSize}B ` +
-        `at=${new Date(now).toISOString()} ` +
-        `sinceConnected=${sinceConnectedMs}ms ` +
-        `sinceLastChunk=${sinceLastChunkMs}ms ` +
-        `total=${session.bytesRecieved}B`
-    );
+    session.vadBuffer.append(audioChunk, (vadFrame) => {
+      session.vadFramesSent += 1;
+      sendToVadModel(session, vadFrame);
+    });
 }
 
 export function getActiveConnectionCount(): number {
   return sessions.size;
 }
 
-function getChunkSize(data: RawData): number {
+function toBuffer(data: RawData): Buffer {
   if (Buffer.isBuffer(data)) {
-    return data.length;
+    return data;
   }
 
   if (data instanceof ArrayBuffer) {
-    return data.byteLength;
+    return Buffer.from(data);
   }
 
   if (Array.isArray(data)) {
-    return data.reduce((total, chunk) => total + chunk.length, 0);
+    return Buffer.concat(data);
   }
 
-  return Buffer.byteLength(String(data));
+  return Buffer.from(String(data));
 }
 
