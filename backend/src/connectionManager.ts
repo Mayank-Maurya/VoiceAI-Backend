@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { RawData, WebSocket } from "ws";
 import { RingBuffer } from "./staticRingBuffer";
 import { sendToVadModel } from "./vad";
+import VAD from "node-vad";
 
 const sessions = new Map<string, ClientSession>();
 
@@ -16,6 +17,8 @@ export function addConnection(socket: WebSocket): ClientSession {
         bytesRecieved: 0,
         vadFramesSent: 0,
         vadBuffer: new RingBuffer(),
+        vad: new VAD(VAD.Mode.NORMAL),
+        vadWork: Promise.resolve(),
     };
 
     sessions.set(session.id, session);
@@ -40,8 +43,14 @@ export function removeConnection(session: ClientSession): void {
 
 export function handleAudio(session: ClientSession, data: RawData, isBinary: boolean) {
     if (!isBinary) {
-        console.warn(`[${session.id}] ignored non-binary message`);
-        return;
+      try {
+        const message = JSON.parse(data.toString());
+        console.log(`[${session.id}] metadata`, message);
+      } catch {
+        console.log(`[${session.id}] ignored text message`);
+      }
+
+      return;
     }
 
     const audioChunk = toBuffer(data);
@@ -50,9 +59,14 @@ export function handleAudio(session: ClientSession, data: RawData, isBinary: boo
     session.bytesRecieved += audioChunk.length;
 
     session.vadBuffer.append(audioChunk, (vadFrame) => {
-      session.vadFramesSent += 1;
-      sendToVadModel(session, vadFrame);
-    });
+    session.vadFramesSent += 1;
+
+    session.vadWork = session.vadWork
+      .then(() => sendToVadModel(session, vadFrame))
+      .catch((error) => {
+        console.error(`[${session.id}] VAD processing failed`, error);
+      });
+  });
 }
 
 export function getActiveConnectionCount(): number {

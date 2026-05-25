@@ -2,7 +2,7 @@ export class RingBuffer {
     private readonly buffer: Buffer;
     private readonly bufferSize: number;
     private offset = 0;
-    constructor(bufferSize: number = 65536) {
+    constructor(bufferSize: number = 3200) {
         this.bufferSize = bufferSize;
         this.buffer = Buffer.allocUnsafe(bufferSize);
     }

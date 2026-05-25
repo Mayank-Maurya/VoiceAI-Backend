@@ -1,5 +1,6 @@
 import type { RawData, WebSocket } from "ws";
 import { RingBuffer } from "./staticRingBuffer";
+import VAD from "node-vad";
 
 export type ClientSession = {
     id: string;
@@ -10,6 +11,8 @@ export type ClientSession = {
     bytesRecieved: number;
     vadFramesSent: number;
     vadBuffer: RingBuffer;
+    vad: VAD;
+    vadWork: Promise<void>,
 };
 
 export type AudioMessage = {

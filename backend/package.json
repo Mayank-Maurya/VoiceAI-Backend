@@ -12,11 +12,13 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "ws": "^8.20.1",
-    "dotenv": "17.4.2"
+    "@ricky0123/vad-node": "^0.0.3",
+    "dotenv": "17.4.2",
+    "node-vad": "^1.1.4",
+    "ws": "^8.20.1"
   },
   "devDependencies": {
-    "@types/node": "^25.9.0",
+    "@types/node": "^25.9.1",
     "@types/ws": "^8.18.1",
     "tsx": "^4.22.3",
     "typescript": "^6.0.3"
