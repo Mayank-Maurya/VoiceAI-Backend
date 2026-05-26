@@ -13,6 +13,8 @@ export type ClientSession = {
     vadBuffer: RingBuffer;
     vad: VAD;
     vadWork: Promise<void>,
+    isSpeaking?: boolean;
+    utteranceBuffer?: Buffer;
 };
 
 export type AudioMessage = {
