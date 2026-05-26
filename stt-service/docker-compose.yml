@@ -14,7 +14,13 @@ services:
       NEMO_CACHE_DIR: /models/nemo
     volumes:
       - voiceai-stt-models:/models
-    gpus: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 volumes:
   voiceai-stt-models:
