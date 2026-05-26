@@ -6,8 +6,6 @@ export const VAD_FRAME_MS = 100;
 export const VAD_FRAME_SAMPLES = (SAMPLE_RATE / 1000) * VAD_FRAME_MS;
 export const VAD_FRAME_BYTES = VAD_FRAME_SAMPLES * BYTES_PER_SAMPLE;
 
-const vad = new VAD(VAD.Mode.AGGRESSIVE);
-
 export async function sendToVadModel(session: ClientSession, frame: Buffer): Promise<void> {
     const stats = inspectPcm16(frame);
     const result = await session.vad.processAudio(frame, SAMPLE_RATE);
