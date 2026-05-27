@@ -1,25 +1,20 @@
 import asyncio
 import os
-import re
 import tempfile
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from threading import Thread
 from typing import Any
 
 import torch
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse
 from fastapi.concurrency import run_in_threadpool
 
 # STT Imports
 from nemo.collections.speechlm2.models import SALM
 
 # --- MONKEY PATCH FOR NEMO MAIN BRANCH COMPATIBILITY ---
-# PyTorch Lightning strictly inspects the __init__ signature, so wrapping 
-# the initialization causes crashes. Instead, we patch the OmegaConf 
-# dictionary directly to safely return the missing tag.
 from omegaconf.dictconfig import DictConfig
 _orig_getattr = DictConfig.__getattr__
 
@@ -38,7 +33,6 @@ DictConfig.__getattr__ = _patched_getattr
 from transformers import (
     AutoModelForCausalLM, 
     AutoTokenizer, 
-    TextIteratorStreamer, 
     BitsAndBytesConfig
 )
 
@@ -115,7 +109,7 @@ class LlmRuntime:
         )
         print("LLM loaded into VRAM.")
 
-    def generate_sentences(self, user_text: str):
+    def generate_response(self, user_text: str) -> str:
         if self.model is None or self.tokenizer is None:
             raise RuntimeError("LLM model is not loaded")
 
@@ -124,6 +118,7 @@ class LlmRuntime:
             {"role": "user", "content": user_text}
         ]
         
+        # Format input synchronously
         inputs = self.tokenizer.apply_chat_template(
             messages, 
             add_generation_prompt=True, 
@@ -131,44 +126,23 @@ class LlmRuntime:
             return_tensors="pt"
         ).to("cuda")
 
-        streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
+        # Generate output synchronously (This will block until the whole answer is done)
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                max_new_tokens=256,
+                temperature=0.6,
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+
+        # Decode the output, stripping away the prompt we sent it
+        input_length = inputs["input_ids"].shape[1]
+        generated_tokens = outputs[0][input_length:]
         
-        generation_kwargs = dict(
-            input_ids=inputs["input_ids"],
-            attention_mask=inputs["attention_mask"],
-            streamer=streamer,
-            max_new_tokens=256,
-            temperature=0.6,
-            do_sample=True,
-        )
-
-        def _thread_runner():
-            try:
-                self.model.generate(**generation_kwargs)
-            except Exception as e:
-                print(f"\n❌ LLM Generation Crashed: {e}\n", flush=True)
-            finally:
-                streamer.text_queue.put(streamer.stop_signal)
-
-        thread = Thread(target=_thread_runner, daemon=True)
-        thread.start()
-
-        sentence_buffer = ""
-        sentence_boundary = re.compile(r'(?<=[.?!])\s')
-
-        for new_text in streamer:
-            sentence_buffer += new_text
-            
-            if sentence_boundary.search(sentence_buffer):
-                parts = sentence_boundary.split(sentence_buffer, 1)
-                clean_sentence = parts[0].strip()
-                sentence_buffer = parts[1] if len(parts) > 1 else ""
-                
-                if clean_sentence:
-                    yield clean_sentence
-
-        if sentence_buffer.strip():
-            yield sentence_buffer.strip()
+        response_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+        return response_text
 
 
 # Instantiate the Singletons
@@ -183,6 +157,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="VoiceAI Mono-Brain", lifespan=lifespan)
 
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {
@@ -192,12 +167,14 @@ async def health() -> dict[str, Any]:
         "loaded": stt_runtime.model is not None,
     }
 
+
 @app.post("/voice-chat")
 async def voice_chat(request: Request):
     audio_bytes = await request.body()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio body")
 
+    # STEP 1: Transcribe the Audio
     tmp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -213,10 +190,13 @@ async def voice_chat(request: Request):
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
 
-    async def audio_stream_generator():
-        async with llm_runtime.lock:
-            for sentence in llm_runtime.generate_sentences(user_text):
-                print(f"[AI THINKING] -> {sentence}")
-                yield f"{sentence}\n".encode("utf-8")
+    # STEP 2: Generate LLM output synchronously
+    async with llm_runtime.lock:
+        ai_response = await run_in_threadpool(llm_runtime.generate_response, user_text)
+        
+    print(f"[AI THINKING] -> {ai_response}\n")
 
-    return StreamingResponse(audio_stream_generator(), media_type="text/plain")
+    # TODO: Pass ai_response to Kokoro TTS here!
+    
+    # Return standard plain text response (No streaming)
+    return PlainTextResponse(ai_response)
