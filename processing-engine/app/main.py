@@ -17,29 +17,21 @@ from fastapi.concurrency import run_in_threadpool
 from nemo.collections.speechlm2.models import SALM
 
 # --- MONKEY PATCH FOR NEMO MAIN BRANCH COMPATIBILITY ---
-_original_salm_init = SALM.__init__
+# PyTorch Lightning strictly inspects the __init__ signature, so wrapping 
+# the initialization causes crashes. Instead, we patch the OmegaConf 
+# dictionary directly to safely return the missing tag.
+from omegaconf.dictconfig import DictConfig
+_orig_getattr = DictConfig.__getattr__
 
-def _patched_salm_init(self, *args, **kwargs):
-    # Safely extract the config whether it's positional or a keyword
-    cfg = kwargs.get("cfg") if "cfg" in kwargs else (args[0] if len(args) > 0 else None)
-    
-    if cfg is not None:
-        if isinstance(cfg, dict):
-            # If it's a raw Python dictionary (which it is here)
-            cfg.setdefault("audio_locator_tag", "<|audioplaceholder|>")
-        else:
-            # If it's already an OmegaConf object
-            from omegaconf import open_dict
-            with open_dict(cfg):
-                if "audio_locator_tag" not in cfg:
-                    cfg.audio_locator_tag = "<|audioplaceholder|>"
-    elif "audio_locator_tag" not in kwargs:
-        # Fallback if config is unpacked directly
-        kwargs["audio_locator_tag"] = "<|audioplaceholder|>"
+def _patched_getattr(self, key):
+    if key == "audio_locator_tag":
+        try:
+            return _orig_getattr(self, key)
+        except Exception:
+            return "<|audioplaceholder|>"
+    return _orig_getattr(self, key)
 
-    _original_salm_init(self, *args, **kwargs)
-
-SALM.__init__ = _patched_salm_init
+DictConfig.__getattr__ = _patched_getattr
 # -------------------------------------------------------
 
 # LLM Imports
@@ -57,6 +49,7 @@ MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "128"))
 LLM_MODEL_ID = "meta-llama/Llama-3.2-1B-Instruct"
 
 HF_TOKEN = os.getenv("HF_TOKEN")
+
 
 class SttRuntime:
     def __init__(self) -> None:
@@ -107,7 +100,6 @@ class LlmRuntime:
 
         print(f"Loading LLM model: {LLM_MODEL_ID} in 4-bit...", flush=True)
         
-        # 4-bit Quantization Config (Reduces VRAM footprint to ~1.2GB)
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
@@ -150,7 +142,6 @@ class LlmRuntime:
             do_sample=True,
         )
 
-        # --- BULLETPROOF THREAD WRAPPER TO PREVENT HANGING ---
         def _thread_runner():
             try:
                 self.model.generate(**generation_kwargs)
@@ -186,7 +177,6 @@ llm_runtime = LlmRuntime()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load both models into the GPU sequentially during boot
     await run_in_threadpool(stt_runtime.load)
     await run_in_threadpool(llm_runtime.load)
     yield
@@ -208,7 +198,6 @@ async def voice_chat(request: Request):
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio body")
 
-    # STEP 1: Transcribe the Audio
     tmp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -224,16 +213,10 @@ async def voice_chat(request: Request):
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
 
-    # STEP 2 & 3: Generate LLM output and Stream (Currently streaming Text to test the logic)
     async def audio_stream_generator():
-        # Lock the LLM so it doesn't try to answer two people at once
         async with llm_runtime.lock:
             for sentence in llm_runtime.generate_sentences(user_text):
                 print(f"[AI THINKING] -> {sentence}")
-                
-                # TODO: Pass `sentence` to Kokoro TTS here!
-                
-                # For now, we yield the text back to Node.js just to prove the stream works
                 yield f"{sentence}\n".encode("utf-8")
 
     return StreamingResponse(audio_stream_generator(), media_type="text/plain")
