@@ -81,7 +81,7 @@ async function dispatchToSTT(sessionId: string, rawPcm: Buffer) {
 
     try {
         // NOTE: Ensure your PC IP matches what you got from `ip addr`
-        const response = await fetch('http://192.168.1.3:7001/transcribe', {
+        const response = await fetch('http://192.168.1.3:7001/voice-chat', {
             method: 'POST',
             headers: {
                 'Content-Type': 'audio/wav'

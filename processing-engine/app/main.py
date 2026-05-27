@@ -16,6 +16,20 @@ from fastapi.concurrency import run_in_threadpool
 # STT Imports
 from nemo.collections.speechlm2.models import SALM
 
+# --- MONKEY PATCH FOR NEMO MAIN BRANCH COMPATIBILITY ---
+_original_salm_init = SALM.__init__
+
+def _patched_salm_init(self, *args, **kwargs):
+    cfg = kwargs.get("cfg") if "cfg" in kwargs else args[0]
+    from omegaconf import open_dict
+    with open_dict(cfg):
+        if "audio_locator_tag" not in cfg:
+            cfg.audio_locator_tag = "<|audioplaceholder|>"
+    _original_salm_init(self, *args, **kwargs)
+
+SALM.__init__ = _patched_salm_init
+# -------------------------------------------------------
+
 # LLM Imports
 from transformers import (
     AutoModelForCausalLM, 
@@ -29,6 +43,8 @@ os.environ["MODEL_NAME"] = "nvidia/canary-qwen-2.5b"
 MODEL_NAME = os.getenv("MODEL_NAME")
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "128"))
 LLM_MODEL_ID = "meta-llama/Llama-3.2-1B-Instruct"
+
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 class SttRuntime:
     def __init__(self) -> None:
@@ -74,6 +90,9 @@ class LlmRuntime:
         if self.model is not None:
             return
 
+        if not HF_TOKEN:
+            print("WARNING: HF_TOKEN environment variable is not set.", flush=True)
+
         print(f"Loading LLM model: {LLM_MODEL_ID} in 4-bit...", flush=True)
         
         # 4-bit Quantization Config (Reduces VRAM footprint to ~1.2GB)
@@ -83,11 +102,12 @@ class LlmRuntime:
             bnb_4bit_use_double_quant=True,
         )
 
-        self.tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_ID)
+        self.tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_ID, token=HF_TOKEN)
         self.model = AutoModelForCausalLM.from_pretrained(
             LLM_MODEL_ID,
             quantization_config=bnb_config,
             device_map="cuda",
+            token=HF_TOKEN
         )
         print("LLM loaded into VRAM.")
 
@@ -95,32 +115,41 @@ class LlmRuntime:
         if self.model is None or self.tokenizer is None:
             raise RuntimeError("LLM model is not loaded")
 
-        # 1. Format for Voice Interaction
         messages = [
             {"role": "system", "content": "You are a helpful, conversational voice assistant. Keep answers brief, natural, and spoken-word friendly. Do not use markdown, emojis, or lists."},
             {"role": "user", "content": user_text}
         ]
         
-        input_ids = self.tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, return_tensors="pt"
+        inputs = self.tokenizer.apply_chat_template(
+            messages, 
+            add_generation_prompt=True, 
+            return_dict=True, 
+            return_tensors="pt"
         ).to("cuda")
 
-        # 2. Setup the Streamer Queue
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
         
         generation_kwargs = dict(
-            input_ids=input_ids,
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
             streamer=streamer,
             max_new_tokens=256,
-            temperature=0.6, # Slightly lower temp for more coherent spoken sentences
+            temperature=0.6,
             do_sample=True,
         )
 
-        # 3. Fire the LLM generation in a background thread
-        thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
+        # --- BULLETPROOF THREAD WRAPPER TO PREVENT HANGING ---
+        def _thread_runner():
+            try:
+                self.model.generate(**generation_kwargs)
+            except Exception as e:
+                print(f"\n❌ LLM Generation Crashed: {e}\n", flush=True)
+            finally:
+                streamer.text_queue.put(streamer.stop_signal)
+
+        thread = Thread(target=_thread_runner, daemon=True)
         thread.start()
 
-        # 4. The Sentence Slicer (Main Thread)
         sentence_buffer = ""
         sentence_boundary = re.compile(r'(?<=[.?!])\s')
 
@@ -133,10 +162,8 @@ class LlmRuntime:
                 sentence_buffer = parts[1] if len(parts) > 1 else ""
                 
                 if clean_sentence:
-                    # YIELD the complete sentence immediately
                     yield clean_sentence
 
-        # 5. Flush the final sentence
         if sentence_buffer.strip():
             yield sentence_buffer.strip()
 
@@ -160,7 +187,7 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "model": MODEL_NAME,
         "cuda": torch.cuda.is_available(),
-        "loaded": runtime.model is not None,
+        "loaded": stt_runtime.model is not None,
     }
 
 @app.post("/voice-chat")
@@ -198,4 +225,3 @@ async def voice_chat(request: Request):
                 yield f"{sentence}\n".encode("utf-8")
 
     return StreamingResponse(audio_stream_generator(), media_type="text/plain")
-
