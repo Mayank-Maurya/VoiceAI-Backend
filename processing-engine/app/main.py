@@ -20,11 +20,23 @@ from nemo.collections.speechlm2.models import SALM
 _original_salm_init = SALM.__init__
 
 def _patched_salm_init(self, *args, **kwargs):
-    cfg = kwargs.get("cfg") if "cfg" in kwargs else args[0]
-    from omegaconf import open_dict
-    with open_dict(cfg):
-        if "audio_locator_tag" not in cfg:
-            cfg.audio_locator_tag = "<|audioplaceholder|>"
+    # Safely extract the config whether it's positional or a keyword
+    cfg = kwargs.get("cfg") if "cfg" in kwargs else (args[0] if len(args) > 0 else None)
+    
+    if cfg is not None:
+        if isinstance(cfg, dict):
+            # If it's a raw Python dictionary (which it is here)
+            cfg.setdefault("audio_locator_tag", "<|audioplaceholder|>")
+        else:
+            # If it's already an OmegaConf object
+            from omegaconf import open_dict
+            with open_dict(cfg):
+                if "audio_locator_tag" not in cfg:
+                    cfg.audio_locator_tag = "<|audioplaceholder|>"
+    elif "audio_locator_tag" not in kwargs:
+        # Fallback if config is unpacked directly
+        kwargs["audio_locator_tag"] = "<|audioplaceholder|>"
+
     _original_salm_init(self, *args, **kwargs)
 
 SALM.__init__ = _patched_salm_init
