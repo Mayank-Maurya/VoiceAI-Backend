@@ -25,14 +25,10 @@ from transformers import (
 )
 
 # --- CONFIGURATION ---
-# os.environ["MODEL_NAME"] = "nvidia/canary-qwen-2.5b"
-os.environ["MODEL_NAME"] = "google/gemma-2b"
-
+os.environ["MODEL_NAME"] = "nvidia/canary-qwen-2.5b"
 MODEL_NAME = os.getenv("MODEL_NAME")
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "128"))
-LLM_MODEL_ID = "google/gemma-2b"
-
-HF_TOKEN = os.getenv("HF_TOKEN")
+LLM_MODEL_ID = "meta-llama/Llama-3.2-1B-Instruct"
 
 class SttRuntime:
     def __init__(self) -> None:
@@ -77,9 +73,6 @@ class LlmRuntime:
     def load(self) -> None:
         if self.model is not None:
             return
-        
-        if not HF_TOKEN:
-            print("WARNING: HF_TOKEN environment variable is not set. Llama download will fail if gated and not cached.", flush=True)
 
         print(f"Loading LLM model: {LLM_MODEL_ID} in 4-bit...", flush=True)
         
@@ -90,15 +83,11 @@ class LlmRuntime:
             bnb_4bit_use_double_quant=True,
         )
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            LLM_MODEL_ID,
-            token=HF_TOKEN
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_ID)
         self.model = AutoModelForCausalLM.from_pretrained(
             LLM_MODEL_ID,
             quantization_config=bnb_config,
             device_map="cuda",
-            token=HF_TOKEN
         )
         print("LLM loaded into VRAM.")
 
