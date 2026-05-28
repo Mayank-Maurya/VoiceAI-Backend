@@ -1,4 +1,6 @@
-This service runs on your dedicated Compute Node (e.g., Linux PC with RTX 3060). You can run this via Docker (recommended for portability) or Bare Metal (recommended for maximum RAM availability).
+This Service is the main processing enginer which handles Three things
+STT -> LLM -> TTS
+and This service runs on your dedicated Compute Node (e.g., Linux PC with RTX 3060). You can run this via Docker (recommended for portability) or Bare Metal (recommended for maximum RAM availability).
 
 # Option A: Docker Deployment
 Prerequisites: Linux OS, NVIDIA GPU, and the nvidia-container-toolkit installed.
