@@ -42,20 +42,6 @@ from transformers import (
 # --- TTS Imports ---
 from kokoro import KPipeline
 
-
-from omegaconf.dictconfig import DictConfig
-_orig_getattr = DictConfig.__getattr__
-
-def _patched_getattr(self, key):
-    if key == "audio_locator_tag":
-        try:
-            return _orig_getattr(self, key)
-        except Exception:
-            return "<|audioplaceholder|>"
-    return _orig_getattr(self, key)
-
-DictConfig.__getattr__ = _patched_getattr
-
 # --- CONFIGURATION ---
 os.environ["MODEL_NAME"] = "nvidia/canary-qwen-2.5b"
 MODEL_NAME = os.getenv("MODEL_NAME")
