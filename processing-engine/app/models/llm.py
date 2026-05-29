@@ -8,6 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from app.config import (
     HF_TOKEN,
+    LLM_DETERMINISTIC,
     LLM_MAX_NEW_TOKENS,
     LLM_MODEL_ID,
     LLM_SYSTEM_PROMPT,
@@ -61,15 +62,20 @@ class LlmRuntime:
             return_tensors="pt",
         ).to("cuda")
 
+        gen_kwargs = {
+            "input_ids": inputs["input_ids"],
+            "attention_mask": inputs["attention_mask"],
+            "max_new_tokens": LLM_MAX_NEW_TOKENS,
+            "pad_token_id": self.tokenizer.eos_token_id,
+        }
+        if LLM_DETERMINISTIC:
+            gen_kwargs["do_sample"] = False  # greedy: reproducible output per input
+        else:
+            gen_kwargs["do_sample"] = True
+            gen_kwargs["temperature"] = LLM_TEMPERATURE
+
         with torch.no_grad():
-            outputs = self.model.generate(
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"],
-                max_new_tokens=LLM_MAX_NEW_TOKENS,
-                temperature=LLM_TEMPERATURE,
-                do_sample=True,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
+            outputs = self.model.generate(**gen_kwargs)
 
         # Strip the prompt tokens so we only decode the newly generated reply.
         input_length = inputs["input_ids"].shape[1]

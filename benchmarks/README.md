@@ -12,7 +12,13 @@ against.
   concurrent users, with min / median / mean / p95 / max and throughput.
 - **Per-stage model timings (STT / LLM / TTS)** are printed in the
   **orchestrator and processing-engine logs** for every request — the WebSocket
-  client can't see them, so read them there.
+  client can't see them, so read them there. Each stage is split into
+  **`compute`** (GPU time) and **`wait`** (time queued behind other requests on
+  the per-model lock), so under load you can tell the two apart:
+
+  ```
+  ⏱️  [id] compute STT=280 LLM=1200 TTS=150ms | wait STT=0 LLM=50 TTS=0ms | total=1680ms roundTrip=...
+  ```
 
 ## Setup
 
@@ -36,7 +42,15 @@ python bench.py
 # Point at a remote orchestrator / tweak the run
 python bench.py --url ws://192.168.1.5:3000/ws/audio --levels 1,5,10,20
 python bench.py --realtime          # pace frames at 100ms (realistic upload)
+
+# Save baselines to CSV for diffing over time (one row per request, appends)
+python bench.py --csv runs.csv --label baseline
+python bench.py --csv runs.csv --label after-batching
 ```
+
+> **For stable, comparable numbers**, run the processing engine with
+> `LLM_DETERMINISTIC=true`. The LLM then produces the same reply (and length)
+> every run for a fixed input, so latency isn't skewed by random reply length.
 
 ## Reading the results
 

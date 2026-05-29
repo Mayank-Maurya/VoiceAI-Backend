@@ -16,10 +16,13 @@ Usage:
 
 import argparse
 import asyncio
+import csv
 import json
+import os
 import statistics
 import time
 import wave
+from datetime import datetime, timezone
 
 SAMPLE_RATE = 16_000
 BYTES_PER_SAMPLE = 2
@@ -125,6 +128,33 @@ def summarize(level: int, results: list[dict], wall: float) -> None:
         print(f"  failures: {len(failed)} ({reasons})")
 
 
+CSV_FIELDS = [
+    "timestamp", "label", "level", "request", "ok", "latency_ms", "total_ms", "reply_bytes", "error"
+]
+
+
+def append_csv(path: str, label: str, level: int, results: list[dict]) -> None:
+    """Append one row per request, writing a header if the file is new."""
+    new_file = not os.path.exists(path) or os.path.getsize(path) == 0
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with open(path, "a", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+        if new_file:
+            writer.writeheader()
+        for i, r in enumerate(results):
+            writer.writerow({
+                "timestamp": timestamp,
+                "label": label,
+                "level": level,
+                "request": i,
+                "ok": r["ok"],
+                "latency_ms": f"{r['latency_ms']:.1f}" if r["ok"] else "",
+                "total_ms": f"{r['total_ms']:.1f}" if r["ok"] else "",
+                "reply_bytes": r.get("reply_bytes", ""),
+                "error": r.get("error", ""),
+            })
+
+
 def percentile(sorted_values: list[float], pct: float) -> float:
     if not sorted_values:
         return 0.0
@@ -148,6 +178,10 @@ async def main() -> None:
                         help="pace frames at 100ms each (realistic) instead of blasting")
     parser.add_argument("--no-warmup", action="store_true",
                         help="skip the warmup request (first inference is often slower)")
+    parser.add_argument("--csv", default=None,
+                        help="append per-request results to this CSV file (for diffing baselines)")
+    parser.add_argument("--label", default="",
+                        help="tag rows in the CSV (e.g. 'baseline', 'after-batching')")
     args = parser.parse_args()
 
     pcm = load_pcm(args.wav)
@@ -166,8 +200,12 @@ async def main() -> None:
     for n in levels:
         results, wall = await run_level(args.url, frames, n, args.timeout, args.realtime)
         summarize(n, results, wall)
+        if args.csv:
+            append_csv(args.csv, args.label, n, results)
 
-    print("\nNote: per-stage STT/LLM/TTS timings are in the orchestrator/engine logs.")
+    if args.csv:
+        print(f"\nResults appended to {args.csv}" + (f" (label='{args.label}')" if args.label else ""))
+    print("Note: per-stage STT/LLM/TTS timings are in the orchestrator/engine logs.")
 
 
 if __name__ == "__main__":

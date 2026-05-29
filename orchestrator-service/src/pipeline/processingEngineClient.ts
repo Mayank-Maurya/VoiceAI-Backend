@@ -30,15 +30,15 @@ export async function runVoicePipeline(session: ClientSession, rawPcm: Buffer): 
         const roundTripMs = Date.now() - startedAt;
         const ttsWavBuffer = Buffer.from(await response.arrayBuffer());
 
-        // Log the per-stage breakdown the engine reports, plus the round trip
-        // measured here (which also includes network + HTTP overhead).
-        const stt = response.headers.get("X-Timing-STT-Ms") ?? "?";
-        const llm = response.headers.get("X-Timing-LLM-Ms") ?? "?";
-        const tts = response.headers.get("X-Timing-TTS-Ms") ?? "?";
-        const total = response.headers.get("X-Timing-Total-Ms") ?? "?";
+        // Log the per-stage breakdown the engine reports (compute vs lock-wait),
+        // plus the round trip measured here (includes network + HTTP overhead).
+        const h = (name: string) => response.headers.get(name) ?? "?";
         console.log(
-            `⏱️  [${session.id}] engine STT=${stt}ms LLM=${llm}ms TTS=${tts}ms ` +
-                `total=${total}ms roundTrip=${roundTripMs}ms`
+            `⏱️  [${session.id}] compute STT=${h("X-Timing-STT-Compute-Ms")} ` +
+                `LLM=${h("X-Timing-LLM-Compute-Ms")} TTS=${h("X-Timing-TTS-Compute-Ms")}ms | ` +
+                `wait STT=${h("X-Timing-STT-Wait-Ms")} LLM=${h("X-Timing-LLM-Wait-Ms")} ` +
+                `TTS=${h("X-Timing-TTS-Wait-Ms")}ms | total=${h("X-Timing-Total-Ms")}ms ` +
+                `roundTrip=${roundTripMs}ms`
         );
 
         if (ttsWavBuffer.length > 0) {

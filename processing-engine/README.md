@@ -71,9 +71,11 @@ curl -X POST http://<PC_IP>:7001/voice-chat \
 
 | Variable          | Default                     | Purpose                                    |
 | ----------------- | --------------------------- | ------------------------------------------ |
-| `MODEL_NAME`      | `nvidia/canary-qwen-2.5b`   | STT model. Swap for a lighter one on low VRAM. |
-| `MAX_NEW_TOKENS`  | `128`                       | STT decode cap.                            |
-| `LLM_MODEL_ID`    | `meta-llama/Llama-3.2-1B-Instruct` | Conversational LLM.                 |
-| `HF_TOKEN`        | _(unset)_                   | HuggingFace token for gated model weights. |
-| `HF_HOME`         | _(unset)_                   | Cache directory for model weights.         |
-| `PORT`            | `7001`                      | Server port.                               |
+| `MODEL_NAME`        | `nvidia/canary-qwen-2.5b`   | STT model. Swap for a lighter one on low VRAM. |
+| `MAX_NEW_TOKENS`    | `128`                       | STT decode cap.                            |
+| `LLM_MODEL_ID`      | `meta-llama/Llama-3.2-1B-Instruct` | Conversational LLM.                 |
+| `LLM_MAX_NEW_TOKENS`| `256`                       | LLM reply length cap.                      |
+| `LLM_DETERMINISTIC` | `false`                     | `true` = greedy decoding: identical reply per input (stable benchmarks). |
+| `HF_TOKEN`          | _(unset)_                   | HuggingFace token for gated model weights. |
+| `HF_HOME`           | _(unset)_                   | Cache directory for model weights.         |
+| `PORT`              | `7001`                      | Server port.                               |

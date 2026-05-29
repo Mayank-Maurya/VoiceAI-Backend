@@ -38,9 +38,12 @@ async def voice_chat(request: Request) -> Response:
         content=result.audio,
         media_type="audio/wav",
         headers={
-            "X-Timing-STT-Ms": f"{result.stt_ms:.1f}",
-            "X-Timing-LLM-Ms": f"{result.llm_ms:.1f}",
-            "X-Timing-TTS-Ms": f"{result.tts_ms:.1f}",
+            "X-Timing-STT-Compute-Ms": f"{result.stt.compute_ms:.1f}",
+            "X-Timing-STT-Wait-Ms": f"{result.stt.wait_ms:.1f}",
+            "X-Timing-LLM-Compute-Ms": f"{result.llm.compute_ms:.1f}",
+            "X-Timing-LLM-Wait-Ms": f"{result.llm.wait_ms:.1f}",
+            "X-Timing-TTS-Compute-Ms": f"{result.tts.compute_ms:.1f}",
+            "X-Timing-TTS-Wait-Ms": f"{result.tts.wait_ms:.1f}",
             "X-Timing-Total-Ms": f"{result.total_ms:.1f}",
         },
     )
