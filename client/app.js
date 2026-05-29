@@ -32,6 +32,9 @@
   var stopRequested = false;
   var chunkCount = 0;
   var byteCount = 0;
+  var playbackQueue = [];
+  var isPlaying = false;
+  var currentPlayback = null;
 
   endpointValue.textContent = websocketUrl;
   formatValue.textContent = "PCM16 mono, " + targetSampleRate + " Hz";
@@ -110,6 +113,7 @@
 
   async function stopStreaming(label) {
     stopRequested = true;
+    stopPlayback();
     setStatus(recordingStatus, "Stopping", "stopping");
 
     if (workletNode) {
@@ -283,13 +287,110 @@
   }
 
   function attachSocketHandlers(activeSocket) {
+    activeSocket.addEventListener("message", handleSocketMessage);
     activeSocket.addEventListener("close", handleSocketClose);
     activeSocket.addEventListener("error", handleSocketError);
   }
 
   function detachSocketHandlers(activeSocket) {
+    activeSocket.removeEventListener("message", handleSocketMessage);
     activeSocket.removeEventListener("close", handleSocketClose);
     activeSocket.removeEventListener("error", handleSocketError);
+  }
+
+  // Incoming server messages: binary frames are the AI's TTS audio (WAV).
+  function handleSocketMessage(event) {
+    var data = event.data;
+
+    if (data instanceof ArrayBuffer) {
+      enqueueAudioResponse(data);
+      return;
+    }
+
+    if (typeof Blob !== "undefined" && data instanceof Blob) {
+      data.arrayBuffer().then(enqueueAudioResponse).catch(function () {});
+      return;
+    }
+
+    // Text/JSON control messages are not used yet; ignore them.
+  }
+
+  function enqueueAudioResponse(arrayBuffer) {
+    if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+      return;
+    }
+
+    playbackQueue.push(arrayBuffer);
+    playNextResponse();
+  }
+
+  // Plays queued responses one after another so replies never overlap.
+  function playNextResponse() {
+    if (isPlaying) {
+      return;
+    }
+
+    var nextBuffer = playbackQueue.shift();
+    if (!nextBuffer) {
+      restoreRecordingStatus();
+      return;
+    }
+
+    isPlaying = true;
+    setStatus(recordingStatus, "Speaking", "speaking");
+
+    var objectUrl = URL.createObjectURL(new Blob([nextBuffer], { type: "audio/wav" }));
+    var audio = new Audio();
+    audio.src = objectUrl;
+    currentPlayback = audio;
+
+    var finished = false;
+    function finish() {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      audio.removeEventListener("ended", finish);
+      audio.removeEventListener("error", finish);
+      URL.revokeObjectURL(objectUrl);
+      if (currentPlayback === audio) {
+        currentPlayback = null;
+      }
+      isPlaying = false;
+      playNextResponse();
+    }
+
+    audio.addEventListener("ended", finish);
+    audio.addEventListener("error", finish);
+
+    var playResult = audio.play();
+    if (playResult && typeof playResult.catch === "function") {
+      playResult.catch(function (error) {
+        showError("Could not play AI audio response: " + formatError(error));
+        finish();
+      });
+    }
+  }
+
+  function restoreRecordingStatus() {
+    if (stopRequested || !audioContext) {
+      return;
+    }
+    setStatus(recordingStatus, "Recording", "recording");
+  }
+
+  function stopPlayback() {
+    playbackQueue = [];
+    isPlaying = false;
+    if (currentPlayback) {
+      try {
+        currentPlayback.pause();
+      } catch (error) {
+        // Ignore teardown errors.
+      }
+      currentPlayback.src = "";
+      currentPlayback = null;
+    }
   }
 
   function handleWorkletMessage(event) {

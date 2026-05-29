@@ -113,6 +113,10 @@ dd[data-state="stopping"] {
   color: var(--warning);
 }
 
+dd[data-state="speaking"] {
+  color: var(--accent);
+}
+
 dd[data-state="error"] {
   color: var(--danger);
 }

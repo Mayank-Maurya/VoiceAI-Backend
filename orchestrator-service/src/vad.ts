@@ -57,7 +57,7 @@ export async function sendToVadModel(session: ClientSession, frame: Buffer): Pro
                 session.utteranceBuffer = Buffer.alloc(0);
 
                 // 3. Dispatch to the STT microservice without blocking the WebSocket loop
-                dispatchToSTT(session.id, completedAudio).catch(err => {
+                dispatchToSTT(session.id, completedAudio, session).catch(err => {
                     console.error(`[${session.id}] Dispatch Error:`, err);
                 });
             }
@@ -66,7 +66,7 @@ export async function sendToVadModel(session: ClientSession, frame: Buffer): Pro
 }
 
 // 4. The Network Dispatcher
-async function dispatchToSTT(sessionId: string, rawPcm: Buffer) {
+async function dispatchToSTT(sessionId: string, rawPcm: Buffer, session: ClientSession) {
     // Prevent sending empty or impossibly short files
     if (rawPcm.length < VAD_FRAME_BYTES * 3) {
         console.log(`[${sessionId}] Audio too short, discarding.`);
@@ -93,13 +93,16 @@ async function dispatchToSTT(sessionId: string, rawPcm: Buffer) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
 
-        const data = await response.json();
-        console.log(data);
-        
-        // console.log(`\n💬 [${sessionId}] TRANSCRIBED: "${data.text}"`);
-        // console.log(`⏱️  [${sessionId}] Inference Time: ${data.compute_time_ms.toFixed(2)} ms\n`);
-
-        // --> TODO: Route `data.text` to your LLM here <--
+        const arrayBuffer = await response.arrayBuffer();
+        const ttsWavBuffer = Buffer.from(arrayBuffer);
+        if (ttsWavBuffer.length > 0) {
+            // Assuming your session object has a WebSocket connection attached to it,
+            // you can send the binary WAV payload directly to the frontend like this:
+            //
+            // session.ws.send(ttsWavBuffer);
+            session.socket.send(ttsWavBuffer);
+            console.log(`✨ [${sessionId}] Dispatched AI voice response back to user.`);
+        }
 
     } catch (error) {
         console.error(`❌ [${sessionId}] STT Request Failed:`, error);

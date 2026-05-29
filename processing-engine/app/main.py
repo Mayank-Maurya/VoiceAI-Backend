@@ -1,4 +1,5 @@
 import asyncio
+import io
 import os
 import tempfile
 import time
@@ -6,9 +7,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import soundfile as sf
 import torch
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from fastapi.concurrency import run_in_threadpool
 
 # STT Imports
@@ -35,6 +38,23 @@ from transformers import (
     AutoTokenizer, 
     BitsAndBytesConfig
 )
+
+# --- TTS Imports ---
+from kokoro import KPipeline
+
+
+from omegaconf.dictconfig import DictConfig
+_orig_getattr = DictConfig.__getattr__
+
+def _patched_getattr(self, key):
+    if key == "audio_locator_tag":
+        try:
+            return _orig_getattr(self, key)
+        except Exception:
+            return "<|audioplaceholder|>"
+    return _orig_getattr(self, key)
+
+DictConfig.__getattr__ = _patched_getattr
 
 # --- CONFIGURATION ---
 os.environ["MODEL_NAME"] = "nvidia/canary-qwen-2.5b"
@@ -144,19 +164,57 @@ class LlmRuntime:
         response_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
         return response_text
 
+class TtsRuntime:
+    def __init__(self) -> None:
+        self.pipeline: Any | None = None
+        self.voice = "af_heart" # The default American Female Kokoro voice
+        self.lock = asyncio.Lock()
+
+    def load(self) -> None:
+        if self.pipeline is not None:
+            return
+        
+        print("Loading TTS model: Kokoro-82M...", flush=True)
+        # Initializes Kokoro with American English
+        self.pipeline = KPipeline(lang_code='a') 
+        print("TTS loaded (CPU/GPU auto-mapped).")
+
+    def generate_audio_bytes(self, text: str) -> bytes:
+        if self.pipeline is None:
+            raise RuntimeError("TTS model is not loaded")
+
+        # Generator yields graphemes, phonemes, and audio arrays
+        generator = self.pipeline(text, voice=self.voice, speed=1.0)
+        
+        audio_chunks = []
+        for _, _, audio in generator:
+            audio_chunks.append(audio)
+            
+        if not audio_chunks:
+            return b""
+            
+        # Combine all audio chunks into a single numpy array
+        full_audio = np.concatenate(audio_chunks)
+        
+        # Write the numpy array into RAM as a WAV file (no disk I/O needed)
+        wav_io = io.BytesIO()
+        sf.write(wav_io, full_audio, 24000, format='WAV')
+        
+        return wav_io.getvalue()
 
 # Instantiate the Singletons
 stt_runtime = SttRuntime()
 llm_runtime = LlmRuntime()
+tts_runtime = TtsRuntime()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await run_in_threadpool(stt_runtime.load)
     await run_in_threadpool(llm_runtime.load)
+    await run_in_threadpool(tts_runtime.load)
     yield
 
 app = FastAPI(title="VoiceAI Mono-Brain", lifespan=lifespan)
-
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
@@ -197,6 +255,8 @@ async def voice_chat(request: Request):
     print(f"[AI THINKING] -> {ai_response}\n")
 
     # TODO: Pass ai_response to Kokoro TTS here!
+    async with tts_runtime.lock:
+        output_wav_bytes = await run_in_threadpool(tts_runtime.generate_audio_bytes, ai_response)
     
     # Return standard plain text response (No streaming)
-    return PlainTextResponse(ai_response)
+    return Response(content=output_wav_bytes, media_type="audio/wav")
