@@ -1,46 +1,99 @@
 import VAD from "node-vad";
 import type { ClientSession } from "../types/session";
-import { SAMPLE_RATE } from "../config";
+import {
+    MIN_SPEECH_FRAMES,
+    RMS_SPEECH_THRESHOLD,
+    SAMPLE_RATE,
+    SPEECH_END_SILENCE_FRAMES,
+    SPEECH_START_FRAMES,
+} from "../config";
+import { computeRms } from "../audio/energy";
 import { runVoicePipeline } from "../pipeline/processingEngineClient";
 
 /**
- * Runs one VAD frame through the speech detector and drives the per-session
- * speech state machine: accumulate audio while the user speaks, and on the
- * trailing silence hand the completed utterance off to the processing engine.
+ * Runs one frame through the speech endpointer.
+ *
+ * Rather than trusting a single VAD frame, this debounces both ends of an
+ * utterance: speech must be sustained for several frames to START, and trailing
+ * silence must persist for several frames to END. An energy gate and a minimum
+ * voice-frame requirement reject the brief, low-level noise blips that would
+ * otherwise be transcribed as phantom "Mm" / "Ooh" utterances.
  */
 export async function sendToVadModel(session: ClientSession, frame: Buffer): Promise<void> {
-    const result = await session.vad.processAudio(frame, SAMPLE_RATE);
+    const vadResult = await session.vad.processAudio(frame, SAMPLE_RATE);
 
-    // Lazily initialize the speech state on the first frame.
-    if (session.isSpeaking === undefined) session.isSpeaking = false;
-    if (!session.utteranceBuffer) session.utteranceBuffer = Buffer.alloc(0);
+    // A frame counts as speech only when the VAD agrees AND it carries enough
+    // energy. The energy gate rejects ambient noise that auto-gain amplifies.
+    const isVoice = vadResult === VAD.Event.VOICE && computeRms(frame) >= RMS_SPEECH_THRESHOLD;
 
-    switch (result) {
-        case VAD.Event.VOICE:
-            if (!session.isSpeaking) {
-                console.log(`🗣️  [${session.id}] Speech STARTED`);
-                session.isSpeaking = true;
-            }
-            session.utteranceBuffer = Buffer.concat([session.utteranceBuffer, frame]);
-            break;
-
-        case VAD.Event.SILENCE:
-        case VAD.Event.NOISE:
-        case VAD.Event.ERROR:
-            // Silence after speech marks the end of an utterance.
-            if (session.isSpeaking) {
-                console.log(`🛑 [${session.id}] Speech ENDED. Captured ${session.utteranceBuffer.length} bytes.`);
-                session.isSpeaking = false;
-
-                // Take the completed utterance and reset the buffer for the next one.
-                const completedAudio = session.utteranceBuffer;
-                session.utteranceBuffer = Buffer.alloc(0);
-
-                // Fire-and-forget so we never block the WebSocket read loop.
-                runVoicePipeline(session, completedAudio).catch((error) => {
-                    console.error(`[${session.id}] Pipeline error:`, error);
-                });
-            }
-            break;
+    if (!session.isSpeaking) {
+        handlePotentialStart(session, frame, isVoice);
+    } else {
+        handleOngoingSpeech(session, frame, isVoice);
     }
+}
+
+/** Before speech is confirmed: require several sustained voice frames to begin. */
+function handlePotentialStart(session: ClientSession, frame: Buffer, isVoice: boolean): void {
+    if (!isVoice) {
+        // The onset wasn't sustained — drop any tentatively buffered lead-in.
+        if (session.speechFrames > 0) {
+            resetSpeechState(session);
+        }
+        return;
+    }
+
+    // Tentatively buffer the lead-in so we don't clip the start of the utterance.
+    session.speechFrames += 1;
+    session.voiceFrameCount += 1;
+    session.utteranceBuffer = Buffer.concat([session.utteranceBuffer, frame]);
+
+    if (session.speechFrames >= SPEECH_START_FRAMES) {
+        session.isSpeaking = true;
+        session.silenceFrames = 0;
+        console.log(`🗣️  [${session.id}] Speech STARTED`);
+    }
+}
+
+/** During speech: keep buffering until enough trailing silence ends the utterance. */
+function handleOngoingSpeech(session: ClientSession, frame: Buffer, isVoice: boolean): void {
+    session.utteranceBuffer = Buffer.concat([session.utteranceBuffer, frame]);
+
+    if (isVoice) {
+        session.voiceFrameCount += 1;
+        session.silenceFrames = 0;
+        return;
+    }
+
+    session.silenceFrames += 1;
+    if (session.silenceFrames < SPEECH_END_SILENCE_FRAMES) {
+        return;
+    }
+
+    // Enough trailing silence: the utterance is complete.
+    const completedAudio = session.utteranceBuffer;
+    const voiceFrames = session.voiceFrameCount;
+    resetSpeechState(session);
+
+    if (voiceFrames < MIN_SPEECH_FRAMES) {
+        console.log(`[${session.id}] Discarded utterance: only ${voiceFrames} voice frames.`);
+        return;
+    }
+
+    console.log(
+        `🛑 [${session.id}] Speech ENDED. ${completedAudio.length} bytes, ${voiceFrames} voice frames.`
+    );
+
+    // Fire-and-forget so we never block the WebSocket read loop.
+    runVoicePipeline(session, completedAudio).catch((error) => {
+        console.error(`[${session.id}] Pipeline error:`, error);
+    });
+}
+
+function resetSpeechState(session: ClientSession): void {
+    session.isSpeaking = false;
+    session.utteranceBuffer = Buffer.alloc(0);
+    session.speechFrames = 0;
+    session.silenceFrames = 0;
+    session.voiceFrameCount = 0;
 }

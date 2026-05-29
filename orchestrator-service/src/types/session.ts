@@ -23,8 +23,10 @@ export type ClientSession = {
     vad: VAD;
     vadWork: Promise<void>;
 
-    // Speech state machine: whether the user is currently speaking and the
-    // audio captured for the in-progress utterance.
-    isSpeaking?: boolean;
-    utteranceBuffer?: Buffer;
+    // Speech endpointing state machine.
+    isSpeaking: boolean; // whether a confirmed utterance is in progress
+    utteranceBuffer: Buffer; // audio captured for the in-progress utterance
+    speechFrames: number; // consecutive voice frames seen (drives speech start)
+    silenceFrames: number; // consecutive silence frames seen (drives speech end)
+    voiceFrameCount: number; // total voice frames in the current utterance
 };

@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { RawData, WebSocket } from "ws";
 import VAD from "node-vad";
 import type { ClientSession } from "../types/session";
-import { VAD_FRAME_BYTES } from "../config";
+import { VAD_FRAME_BYTES, VAD_MODE } from "../config";
 import { RingBuffer } from "../audio/ringBuffer";
 import { sendToVadModel } from "../vad/speechDetector";
 
@@ -17,8 +17,13 @@ export function addConnection(socket: WebSocket): ClientSession {
         bytesReceived: 0,
         vadFramesSent: 0,
         vadBuffer: new RingBuffer(VAD_FRAME_BYTES),
-        vad: new VAD(VAD.Mode.NORMAL),
+        vad: new VAD(VAD_MODE),
         vadWork: Promise.resolve(),
+        isSpeaking: false,
+        utteranceBuffer: Buffer.alloc(0),
+        speechFrames: 0,
+        silenceFrames: 0,
+        voiceFrameCount: 0,
     };
 
     sessions.set(session.id, session);
