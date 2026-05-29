@@ -1,24 +1,20 @@
 import http from "node:http";
 import { WebSocketServer } from "ws";
-import { addConnection, handleAudio, removeConnection } from "./connectionManager";
-import dotenv from "dotenv";
-dotenv.config();
+import { PORT, WS_PATH } from "./config";
+import { addConnection, handleAudio, removeConnection } from "./session/sessionManager";
 
-const WS_PATH = "/ws/audio";
-const PORT = 3000;
-
-const server = http.createServer((req,res) => {
+const server = http.createServer((req, res) => {
     if (req.url === "/health") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
         return;
-    } 
+    }
 
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "Not found" }));
 });
 
-// setup websockets
+// Handle WebSocket upgrades ourselves so we can reject unknown paths.
 const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
@@ -34,7 +30,6 @@ server.on("upgrade", (req, socket, head) => {
         wss.emit("connection", ws, req);
     });
 });
-
 
 wss.on("connection", (socket) => {
     const session = addConnection(socket);
