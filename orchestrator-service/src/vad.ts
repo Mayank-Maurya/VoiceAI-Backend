@@ -1,6 +1,8 @@
 import type { ClientSession } from "./types";
 import VAD from "node-vad";
 
+const PROCESSING_ENGINE_URL = process.env.PROCESSING_ENGINE_URL ?? "http://192.168.1.7:7001";
+
 export const SAMPLE_RATE = 16_000;
 export const BYTES_PER_SAMPLE = 2;
 export const VAD_FRAME_MS = 100;
@@ -80,8 +82,7 @@ async function dispatchToSTT(sessionId: string, rawPcm: Buffer, session: ClientS
     console.log(`🚀 [${sessionId}] Sending ${fullWavFile.length} bytes to STT Worker...`);
 
     try {
-        // NOTE: Ensure your PC IP matches what you got from `ip addr`
-        const response = await fetch('http://192.168.1.3:7001/voice-chat', {
+        const response = await fetch(`${PROCESSING_ENGINE_URL}/voice-chat`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'audio/wav'
@@ -96,12 +97,8 @@ async function dispatchToSTT(sessionId: string, rawPcm: Buffer, session: ClientS
         const arrayBuffer = await response.arrayBuffer();
         const ttsWavBuffer = Buffer.from(arrayBuffer);
         if (ttsWavBuffer.length > 0) {
-            // Assuming your session object has a WebSocket connection attached to it,
-            // you can send the binary WAV payload directly to the frontend like this:
-            //
-            // session.ws.send(ttsWavBuffer);
             session.socket.send(ttsWavBuffer);
-            console.log(`✨ [${sessionId}] Dispatched AI voice response back to user.`);
+            console.log(`✨ [${sessionId}] Dispatched AI voice response (${ttsWavBuffer.length} bytes) back to user.`);
         }
 
     } catch (error) {

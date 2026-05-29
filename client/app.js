@@ -408,6 +408,12 @@
       return;
     }
 
+    // Drop mic frames while the AI is speaking to prevent the VAD from
+    // picking up the speaker output and looping it back as user input.
+    if (isPlaying) {
+      return;
+    }
+
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       stopStreaming("Stopped");
       showError("WebSocket is not open. Audio streaming stopped.");
