@@ -8,13 +8,13 @@ from typing import Any
 
 import pika
 
-from app.models import stt_runtime
+from app.models import tts_runtime
 
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://localhost")
 TTS_JOBS_QUEUE = os.getenv("TTS_JOBS_QUEUE", "tts.jobs")
 TTS_PREFETCH = int(os.getenv("TTS_PREFETCH", "1"))
 
-runtime = stt_runtime
+runtime = tts_runtime
 
 def main() -> None:
     print("Loading TTS runtime...", flush=True)
