@@ -14,7 +14,7 @@ RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://localhost")
 STT_JOBS_QUEUE = os.getenv("STT_JOBS_QUEUE", "stt.jobs")
 STT_PREFETCH = int(os.getenv("STT_PREFETCH", "1"))
 
-runtime = stt_runtimew
+runtime = stt_runtime
 
 def main() -> None:
     print("Loading STT runtime...", flush=True)
