@@ -8,13 +8,13 @@ from typing import Any
 
 import pika
 
-from app.models import stt_runtime 
+from ..models import stt_runtime 
 
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://localhost")
 STT_JOBS_QUEUE = os.getenv("STT_JOBS_QUEUE", "stt.jobs")
 STT_PREFETCH = int(os.getenv("STT_PREFETCH", "1"))
 
-runtime = stt_runtime
+runtime = stt_runtimew
 
 def main() -> None:
     print("Loading STT runtime...", flush=True)
