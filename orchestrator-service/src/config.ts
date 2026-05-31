@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import crypto from "node:crypto";
 
 dotenv.config();
 
@@ -8,7 +9,7 @@ export const WS_PATH = "/ws/audio";
 
 // --- Downstream processing engine (STT -> LLM -> TTS) ---
 export const PROCESSING_ENGINE_URL =
-    process.env.PROCESSING_ENGINE_URL ?? "http://192.168.1.7:7001";
+    process.env.PROCESSING_ENGINE_URL ?? "http://192.168.1.9:7001";
 
 // --- Audio format: 16 kHz, 16-bit (2 bytes per sample), mono PCM ---
 export const SAMPLE_RATE = 16_000;
@@ -47,3 +48,27 @@ function clampVadMode(value: number): 0 | 1 | 2 | 3 {
     const clamped = Math.min(3, Math.max(0, Math.round(value)));
     return clamped as 0 | 1 | 2 | 3;
 }
+
+export const RABBITMQ_URL = process.env.RABBITMQ_URL ?? "amqp://voiceai:voiceai_password@192.168.1.9:5672";
+
+export const ORCHESTRATOR_INSTANCE_ID =
+    process.env.ORCHESTRATOR_INSTANCE_ID ?? `orchestrator-${crypto.randomUUID()}`;
+
+export const STT_JOBS_QUEUE = process.env.STT_JOBS_QUEUE ?? "stt.jobs";
+export const TTS_JOBS_QUEUE = process.env.TTS_JOBS_QUEUE ?? "tts.jobs";
+
+export const ORCHESTRATOR_REPLY_QUEUE =
+    process.env.ORCHESTRATOR_REPLY_QUEUE ?? `orchestrator.replies.${ORCHESTRATOR_INSTANCE_ID}`;
+
+export const STAGE_TIMEOUT_MS = Number(process.env.STAGE_TIMEOUT_MS ?? 30_000);
+
+export const VLLM_BASE_URL = process.env.VLLM_BASE_URL ?? "http://192.168.1.9:8000";
+export const VLLM_MODEL_ID =
+    process.env.VLLM_MODEL_ID ?? "meta-llama/Llama-3.2-1B-Instruct";
+
+export const LLM_MAX_NEW_TOKENS = Number(process.env.LLM_MAX_NEW_TOKENS ?? 256);
+export const LLM_TEMPERATURE = Number(process.env.LLM_TEMPERATURE ?? 0.6);
+
+export const LLM_SYSTEM_PROMPT =
+    process.env.LLM_SYSTEM_PROMPT ??
+    "You are a helpful, conversational voice assistant. Keep answers brief, natural, and spoken-word friendly. Do not use markdown, emojis, or lists.";

@@ -9,3 +9,4 @@ bitsandbytes
 kokoro
 numpy
 soundfile
+pika

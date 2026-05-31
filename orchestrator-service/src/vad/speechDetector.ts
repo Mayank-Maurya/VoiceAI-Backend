@@ -8,7 +8,7 @@ import {
     SPEECH_START_FRAMES,
 } from "../config";
 import { computeRms } from "../audio/energy";
-import { runVoicePipeline } from "../pipeline/processingEngineClient";
+import { runVoicePipeline } from "../pipeline/voicePipeline";
 
 /**
  * Runs one frame through the speech endpointer.

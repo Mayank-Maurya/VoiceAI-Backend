@@ -2,6 +2,7 @@ import http from "node:http";
 import { WebSocketServer } from "ws";
 import { PORT, WS_PATH } from "./config";
 import { addConnection, handleAudio, removeConnection } from "./session/sessionManager";
+import { rabbitRpcClient } from "./messaging/rabbitRpcClient";
 
 const server = http.createServer((req, res) => {
     if (req.url === "/health") {
@@ -47,7 +48,16 @@ wss.on("connection", (socket) => {
     });
 });
 
-server.listen(PORT, () => {
-    console.log(`HTTP server listening on http://localhost:${PORT}`);
-    console.log(`WebSocket endpoint ready at ws://localhost:${PORT}${WS_PATH}`);
+async function main(): Promise<void> {
+    await rabbitRpcClient.connect();
+
+    server.listen(PORT, () => {
+        console.log(`HTTP server listening on http://localhost:${PORT}`);
+        console.log(`WebSocket endpoint ready at ws://localhost:${PORT}${WS_PATH}`);
+    });
+}
+
+main().catch((error) => {
+    console.error("Failed to start orchestrator", error);
+    process.exit(1);
 });
