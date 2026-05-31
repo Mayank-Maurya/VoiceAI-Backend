@@ -64,7 +64,7 @@ export const STAGE_TIMEOUT_MS = Number(process.env.STAGE_TIMEOUT_MS ?? 30_000);
 
 export const VLLM_BASE_URL = process.env.VLLM_BASE_URL ?? "http://192.168.1.9:8000";
 export const VLLM_MODEL_ID =
-    process.env.VLLM_MODEL_ID ?? "meta-llama/Llama-3.2-1B-Instruct";
+    process.env.VLLM_MODEL_ID ?? "Qwen/Qwen2.5-0.5B-Instruct";
 
 export const LLM_MAX_NEW_TOKENS = Number(process.env.LLM_MAX_NEW_TOKENS ?? 256);
 export const LLM_TEMPERATURE = Number(process.env.LLM_TEMPERATURE ?? 0.6);

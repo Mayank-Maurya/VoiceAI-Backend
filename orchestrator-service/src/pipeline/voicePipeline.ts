@@ -71,7 +71,15 @@ export async function runVoicePipeline(session: ClientSession, rawPcm: Buffer): 
             },
         });
 
-        if (ttsWavBuffer.length > 0 && session.socket.readyState === session.socket.OPEN) {
+        if (!isWav(ttsWavBuffer)) {
+            console.error(
+                `[${session.id}] turn=${turnId} TTS returned non-WAV: ` +
+                ttsWavBuffer.toString("utf8").slice(0, 500)
+            );
+            return;
+        }
+
+        if (session.socket.readyState === session.socket.OPEN) {
             session.socket.send(ttsWavBuffer);
         }
 
@@ -79,4 +87,12 @@ export async function runVoicePipeline(session: ClientSession, rawPcm: Buffer): 
     } catch (error) {
         console.error(`[${session.id}] turn=${turnId} failed`, error);
     }
+}
+
+function isWav(buffer: Buffer): boolean {
+    return (
+        buffer.length >= 12 &&
+        buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+        buffer.subarray(8, 12).toString("ascii") === "WAVE"
+    );
 }
