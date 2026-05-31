@@ -56,6 +56,8 @@ def handle_message(channel: Any, method: Any, properties: Any, body: bytes) -> N
             raise ValueError("Missing text")
 
         wav_bytes = runtime.generate_audio_bytes(text)
+        print(f"TTS generated {len(wav_bytes)} bytes for text={text!r}", flush=True)
+        print(f"TTS first bytes={wav_bytes[:12]!r}", flush=True)
 
         channel.basic_publish(
             exchange="",
@@ -64,7 +66,7 @@ def handle_message(channel: Any, method: Any, properties: Any, body: bytes) -> N
                 correlation_id=correlation_id,
                 content_type="audio/wav",
                 headers={
-                    "computeMs": round((time.perf_counter() - started_at) * 1000, 1),
+                    "computeMs": int((time.perf_counter() - started_at) * 1000),
                 },
             ),
             body=wav_bytes,
@@ -77,6 +79,7 @@ def handle_message(channel: Any, method: Any, properties: Any, body: bytes) -> N
             "stage": "tts",
             "error": str(error),
         }
+        print(f"TTS error: {error}", flush=True)
 
         channel.basic_publish(
             exchange="",
