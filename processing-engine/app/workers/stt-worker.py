@@ -8,7 +8,7 @@ from typing import Any
 
 import pika
 
-from ..models import stt_runtime 
+from app.models import stt_runtime
 
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://localhost")
 STT_JOBS_QUEUE = os.getenv("STT_JOBS_QUEUE", "stt.jobs")

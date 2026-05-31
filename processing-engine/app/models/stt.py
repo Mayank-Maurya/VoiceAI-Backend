@@ -13,7 +13,6 @@ apply_nemo_compat()
 
 from nemo.collections.speechlm2.models import SALM  # noqa: E402
 
-
 class SttRuntime:
     def __init__(self) -> None:
         self.model: Any | None = None
