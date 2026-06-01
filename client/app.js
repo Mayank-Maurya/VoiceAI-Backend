@@ -12,6 +12,9 @@
   var targetSampleRate = config.TARGET_SAMPLE_RATE || DEFAULT_TARGET_SAMPLE_RATE;
   var frameDurationMs = config.FRAME_DURATION_MS || DEFAULT_FRAME_DURATION_MS;
 
+  var voiceStage = document.getElementById("voiceStage");
+  var primaryStatus = document.getElementById("primaryStatus");
+  var statusHint = document.getElementById("statusHint");
   var startButton = document.getElementById("startButton");
   var stopButton = document.getElementById("stopButton");
   var connectionStatus = document.getElementById("connectionStatus");
@@ -35,9 +38,14 @@
   var playbackQueue = [];
   var isPlaying = false;
   var currentPlayback = null;
+  var activityTimer = null;
+  var voiceState = "idle";
+  var lastVoiceAt = 0;
 
   endpointValue.textContent = websocketUrl;
   formatValue.textContent = "PCM16 mono, " + targetSampleRate + " Hz";
+  setVoiceState("idle");
+  setActivity(0);
 
   startButton.addEventListener("click", function () {
     startStreaming().catch(handleFatalStartError);
@@ -64,6 +72,7 @@
     isStarting = true;
     setStatus(connectionStatus, "Connecting", "connecting");
     setStatus(recordingStatus, "Waiting", "connecting");
+    setVoiceState("connecting");
     updateControls();
 
     try {
@@ -99,6 +108,7 @@
       sendStartMessage();
       connectAudioGraph();
       setStatus(recordingStatus, "Recording", "recording");
+      setVoiceState("listening");
     } catch (error) {
       var wasStopped = stopRequested;
       await stopStreaming("Idle");
@@ -114,7 +124,9 @@
   async function stopStreaming(label) {
     stopRequested = true;
     stopPlayback();
+    clearActivityTimer();
     setStatus(recordingStatus, "Stopping", "stopping");
+    setVoiceState("connecting");
 
     if (workletNode) {
       workletNode.port.postMessage({ type: "stop" });
@@ -160,6 +172,8 @@
 
     setStatus(connectionStatus, "Idle", "idle");
     setStatus(recordingStatus, label || "Idle", "idle");
+    setVoiceState("idle");
+    setActivity(0);
     updateControls();
   }
 
@@ -338,6 +352,8 @@
 
     isPlaying = true;
     setStatus(recordingStatus, "Speaking", "speaking");
+    setVoiceState("speaking");
+    setActivity(0.72);
 
     var objectUrl = URL.createObjectURL(new Blob([nextBuffer], { type: "audio/wav" }));
     var audio = new Audio();
@@ -377,6 +393,7 @@
       return;
     }
     setStatus(recordingStatus, "Recording", "recording");
+    setVoiceState("listening");
   }
 
   function stopPlayback() {
@@ -413,6 +430,8 @@
     if (isPlaying) {
       return;
     }
+
+    updateVoiceActivity(buffer);
 
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       stopStreaming("Stopped");
@@ -482,12 +501,16 @@
   function setStatus(element, text, state) {
     element.textContent = text;
     element.dataset.state = state;
+    if (element === connectionStatus && voiceStage) {
+      voiceStage.dataset.connectionState = state;
+    }
   }
 
   function showError(message) {
     errorMessage.textContent = message;
     errorMessage.hidden = false;
     setStatus(connectionStatus, "Error", "error");
+    setVoiceState("error");
   }
 
   function clearError() {
@@ -516,5 +539,115 @@
     }
 
     return (bytes / (1024 * 1024)).toFixed(2) + " MB";
+  }
+
+  function setVoiceState(state) {
+    voiceState = state;
+    if (voiceStage) {
+      voiceStage.dataset.voiceState = state;
+    }
+
+    var copy = getVoiceCopy(state);
+    if (primaryStatus) {
+      primaryStatus.textContent = copy.title;
+    }
+    if (statusHint) {
+      statusHint.textContent = copy.hint;
+    }
+  }
+
+  function getVoiceCopy(state) {
+    if (state === "connecting") {
+      return {
+        title: "Opening channel",
+        hint: "Preparing the live voice stream."
+      };
+    }
+
+    if (state === "listening") {
+      return {
+        title: "Listening",
+        hint: "I am listening."
+      };
+    }
+
+    if (state === "thinking") {
+      return {
+        title: "Thinking",
+        hint: "Working on your last phrase."
+      };
+    }
+
+    if (state === "speaking") {
+      return {
+        title: "Speaking",
+        hint: "Response is playing."
+      };
+    }
+
+    if (state === "error") {
+      return {
+        title: "Needs attention",
+        hint: "Something interrupted the stream."
+      };
+    }
+
+    return {
+      title: "Ready when you are",
+      hint: "The room is quiet."
+    };
+  }
+
+  function updateVoiceActivity(buffer) {
+    var level = measurePcmActivity(buffer);
+    setActivity(level);
+
+    if (!audioContext || stopRequested || voiceState === "speaking") {
+      return;
+    }
+
+    if (level > 0.08) {
+      lastVoiceAt = Date.now();
+      clearActivityTimer();
+      if (voiceState !== "listening") {
+        setVoiceState("listening");
+      }
+      activityTimer = setTimeout(function () {
+        if (!stopRequested && audioContext && !isPlaying && Date.now() - lastVoiceAt >= 800) {
+          setVoiceState("thinking");
+          setActivity(0.16);
+        }
+      }, 900);
+    }
+  }
+
+  function measurePcmActivity(buffer) {
+    if (!buffer || buffer.byteLength < 2) {
+      return 0;
+    }
+
+    var samples = new Int16Array(buffer);
+    var sum = 0;
+    for (var i = 0; i < samples.length; i += 1) {
+      var value = samples[i] / 32768;
+      sum += value * value;
+    }
+
+    var rms = Math.sqrt(sum / samples.length);
+    return Math.max(0, Math.min(1, rms * 8));
+  }
+
+  function setActivity(value) {
+    if (!voiceStage) {
+      return;
+    }
+    voiceStage.style.setProperty("--activity", String(Math.max(0, Math.min(1, value))));
+  }
+
+  function clearActivityTimer() {
+    if (activityTimer) {
+      clearTimeout(activityTimer);
+      activityTimer = null;
+    }
   }
 })();

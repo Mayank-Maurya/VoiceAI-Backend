@@ -3,51 +3,81 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Voice AI Client</title>
+    <title>VoiceAI</title>
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
-    <main class="app-shell" aria-labelledby="app-title">
-      <section class="stream-panel">
-        <header class="masthead">
-          <p class="eyebrow">Voice AI Client</p>
-          <h1 id="app-title">Audio Stream</h1>
-        </header>
-
-        <dl class="status-grid" aria-live="polite">
-          <div class="status-item">
-            <dt>Connection</dt>
-            <dd id="connectionStatus" data-state="idle">Idle</dd>
-          </div>
-          <div class="status-item">
-            <dt>Recording</dt>
-            <dd id="recordingStatus" data-state="idle">Idle</dd>
-          </div>
-          <div class="status-item wide">
-            <dt>Endpoint</dt>
-            <dd id="endpointValue">Not configured</dd>
-          </div>
-          <div class="status-item wide">
-            <dt>Format</dt>
-            <dd id="formatValue">PCM16 mono</dd>
-          </div>
-          <div class="status-item">
-            <dt>Chunks</dt>
-            <dd id="chunksSent">0</dd>
-          </div>
-          <div class="status-item">
-            <dt>Sent</dt>
-            <dd id="bytesSent">0 B</dd>
-          </div>
-        </dl>
-
-        <div class="controls">
-          <button id="startButton" class="button primary" type="button">Start</button>
-          <button id="stopButton" class="button" type="button" disabled>Stop</button>
+    <main id="voiceStage" class="voice-stage" data-voice-state="idle" aria-labelledby="app-title">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">VoiceAI</p>
+          <h1 id="app-title">Live Voice</h1>
         </div>
+        <div class="connection-chip" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="connectionStatus" data-state="idle">Idle</span>
+        </div>
+      </header>
 
-        <p id="errorMessage" class="error-message" role="alert" hidden></p>
+      <section class="agent-zone" aria-live="polite">
+        <div class="agent-halo" aria-hidden="true"></div>
+        <div id="agentActivity" class="agent-bubble" role="img" aria-label="Voice agent activity">
+          <span class="agent-core" aria-hidden="true"></span>
+          <span class="waveform" aria-hidden="true">
+            <span class="signal-bar"></span>
+            <span class="signal-bar"></span>
+            <span class="signal-bar"></span>
+            <span class="signal-bar"></span>
+            <span class="signal-bar"></span>
+          </span>
+        </div>
+        <div class="agent-ground" aria-hidden="true"></div>
       </section>
+
+      <section class="voice-copy">
+        <p id="primaryStatus" class="primary-status">Ready when you are</p>
+        <p id="statusHint" class="status-hint">The room is quiet.</p>
+        <span id="recordingStatus" class="sr-status" data-state="idle">Idle</span>
+      </section>
+
+      <section class="controls" aria-label="Voice controls">
+        <button id="startButton" class="control-button primary" type="button">
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"></path>
+            <path d="M5 11a7 7 0 0 0 14 0"></path>
+            <path d="M12 18v3"></path>
+            <path d="M8 21h8"></path>
+          </svg>
+          <span>Start</span>
+        </button>
+        <button id="stopButton" class="control-button" type="button" disabled>
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <rect x="7" y="7" width="10" height="10" rx="1"></rect>
+          </svg>
+          <span>Stop</span>
+        </button>
+      </section>
+
+      <dl class="signal-strip" aria-label="Session details">
+        <div>
+          <dt>Endpoint</dt>
+          <dd id="endpointValue">Not configured</dd>
+        </div>
+        <div>
+          <dt>Format</dt>
+          <dd id="formatValue">PCM16 mono</dd>
+        </div>
+        <div>
+          <dt>Chunks</dt>
+          <dd id="chunksSent">0</dd>
+        </div>
+        <div>
+          <dt>Sent</dt>
+          <dd id="bytesSent">0 B</dd>
+        </div>
+      </dl>
+
+      <p id="errorMessage" class="error-message" role="alert" hidden></p>
     </main>
 
     <script src="./config.js"></script>
