@@ -41,6 +41,16 @@ export const SPEECH_START_FRAMES = Number(process.env.SPEECH_START_FRAMES ?? 3);
 // Consecutive silence frames required to END an utterance (~800 ms hangover).
 export const SPEECH_END_SILENCE_FRAMES = Number(process.env.SPEECH_END_SILENCE_FRAMES ?? 8);
 
+// Short utterances (< this many voice frames) use a faster silence cutoff.
+// Default 10 frames = ~1 s of speech. "Yes", "No", "Hello" finish faster.
+export const SHORT_UTTERANCE_VOICE_FRAMES = Number(process.env.SHORT_UTTERANCE_VOICE_FRAMES ?? 10);
+
+// Silence frames to end a SHORT utterance (~300 ms). Must be <= SPEECH_END_SILENCE_FRAMES.
+export const SHORT_UTTERANCE_SILENCE_FRAMES = Number(process.env.SHORT_UTTERANCE_SILENCE_FRAMES ?? 3);
+
+// Silence frames to end a LONG utterance (~500 ms). This replaces the old default of 8.
+export const LONG_UTTERANCE_SILENCE_FRAMES = Number(process.env.LONG_UTTERANCE_SILENCE_FRAMES ?? 5);
+
 // Minimum total voice frames an utterance must contain to be dispatched (~500 ms).
 export const MIN_SPEECH_FRAMES = Number(process.env.MIN_SPEECH_FRAMES ?? 5);
 
@@ -49,7 +59,7 @@ function clampVadMode(value: number): 0 | 1 | 2 | 3 {
     return clamped as 0 | 1 | 2 | 3;
 }
 
-export const RABBITMQ_URL = process.env.RABBITMQ_URL ?? "amqp://voiceai:voiceai_password@192.168.1.9:5672";
+export const RABBITMQ_URL = process.env.RABBITMQ_URL ?? "amqp://voiceai:voiceai_password@192.168.1.6:5672";
 
 export const ORCHESTRATOR_INSTANCE_ID =
     process.env.ORCHESTRATOR_INSTANCE_ID ?? `orchestrator-${crypto.randomUUID()}`;
@@ -62,7 +72,7 @@ export const ORCHESTRATOR_REPLY_QUEUE =
 
 export const STAGE_TIMEOUT_MS = Number(process.env.STAGE_TIMEOUT_MS ?? 30_000);
 
-export const VLLM_BASE_URL = process.env.VLLM_BASE_URL ?? "http://192.168.1.9:8000";
+export const VLLM_BASE_URL = process.env.VLLM_BASE_URL ?? "http://192.168.1.6:8000";
 export const VLLM_MODEL_ID =
     process.env.VLLM_MODEL_ID ?? "Qwen/Qwen2.5-0.5B-Instruct";
 

@@ -29,6 +29,7 @@ export async function runVoicePipeline(session: ClientSession, rawPcm: Buffer): 
 
         console.log(`[${session.id}] turn=${turnId} STT queued`);
 
+        const sttStart = Date.now();
         const sttReplyBuffer = await rabbitRpcClient.request(STT_JOBS_QUEUE, wavFile, {
             timeoutMs: STAGE_TIMEOUT_MS,
             contentType: "audio/wav",
@@ -38,6 +39,7 @@ export async function runVoicePipeline(session: ClientSession, rawPcm: Buffer): 
                 sampleRate: SAMPLE_RATE,
             },
         });
+        const sttMs = Date.now() - sttStart;
 
         const sttReply = JSON.parse(sttReplyBuffer.toString("utf8")) as SttReply;
         const userText = sttReply.text.trim();
@@ -49,7 +51,9 @@ export async function runVoicePipeline(session: ClientSession, rawPcm: Buffer): 
 
         console.log(`[${session.id}] USER: ${userText}`);
 
+        const llmStart = Date.now();
         const aiText = await generateLlmResponse(userText);
+        const llmMs = Date.now() - llmStart;
         console.log(`[${session.id}] AI: ${aiText}`);
 
         const ttsRequest = Buffer.from(
@@ -62,6 +66,7 @@ export async function runVoicePipeline(session: ClientSession, rawPcm: Buffer): 
             "utf8"
         );
 
+        const ttsStart = Date.now();
         const ttsWavBuffer = await rabbitRpcClient.request(TTS_JOBS_QUEUE, ttsRequest, {
             timeoutMs: STAGE_TIMEOUT_MS,
             contentType: "application/json",
@@ -70,6 +75,7 @@ export async function runVoicePipeline(session: ClientSession, rawPcm: Buffer): 
                 turnId,
             },
         });
+        const ttsMs = Date.now() - ttsStart;
 
         if (!isWav(ttsWavBuffer)) {
             console.error(
@@ -83,7 +89,11 @@ export async function runVoicePipeline(session: ClientSession, rawPcm: Buffer): 
             session.socket.send(ttsWavBuffer);
         }
 
-        console.log(`[${session.id}] turn=${turnId} complete total=${Date.now() - startedAt}ms`);
+        const totalMs = Date.now() - startedAt;
+        console.log(
+            `[${session.id}] turn=${turnId} complete ` +
+            `STT=${sttMs}ms LLM=${llmMs}ms TTS=${ttsMs}ms total=${totalMs}ms`
+        );
     } catch (error) {
         console.error(`[${session.id}] turn=${turnId} failed`, error);
     }

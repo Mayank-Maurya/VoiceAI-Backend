@@ -1,9 +1,12 @@
 import VAD from "node-vad";
 import type { ClientSession } from "../types/session";
 import {
+    LONG_UTTERANCE_SILENCE_FRAMES,
     MIN_SPEECH_FRAMES,
     RMS_SPEECH_THRESHOLD,
     SAMPLE_RATE,
+    SHORT_UTTERANCE_SILENCE_FRAMES,
+    SHORT_UTTERANCE_VOICE_FRAMES,
     SPEECH_END_SILENCE_FRAMES,
     SPEECH_START_FRAMES,
 } from "../config";
@@ -66,13 +69,17 @@ function handleOngoingSpeech(session: ClientSession, frame: Buffer, isVoice: boo
     }
 
     session.silenceFrames += 1;
-    if (session.silenceFrames < SPEECH_END_SILENCE_FRAMES) {
+    const silenceThreshold = session.voiceFrameCount < SHORT_UTTERANCE_VOICE_FRAMES
+        ? SHORT_UTTERANCE_SILENCE_FRAMES
+        : LONG_UTTERANCE_SILENCE_FRAMES;
+    if (session.silenceFrames < silenceThreshold) {
         return;
     }
 
     // Enough trailing silence: the utterance is complete.
     const completedAudio = session.utteranceBuffer;
     const voiceFrames = session.voiceFrameCount;
+    const hangoverMs = silenceThreshold * 100; 
     resetSpeechState(session);
 
     if (voiceFrames < MIN_SPEECH_FRAMES) {
@@ -81,7 +88,7 @@ function handleOngoingSpeech(session: ClientSession, frame: Buffer, isVoice: boo
     }
 
     console.log(
-        `🛑 [${session.id}] Speech ENDED. ${completedAudio.length} bytes, ${voiceFrames} voice frames.`
+        `🛑 [${session.id}] Speech ENDED. ${completedAudio.length} bytes, ` + `${voiceFrames} voice frames, hangover=${hangoverMs}ms`
     );
 
     // Fire-and-forget so we never block the WebSocket read loop.
