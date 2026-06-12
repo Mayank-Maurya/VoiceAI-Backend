@@ -1,12 +1,38 @@
-# VoiceAI Backend
+# VoiceAI Backend — real-time, low-latency voice assistant
 
-VoiceAI Backend is a low-latency voice assistant backend built around a thin
-browser client, a Node.js WebSocket orchestrator, GPU-backed speech models, and
-an evolving service-based inference pipeline.
+![Node.js](https://img.shields.io/badge/Node.js-orchestrator-339933?logo=node.js&logoColor=white)
+![WebSockets](https://img.shields.io/badge/transport-WebSockets-blue)
+![RabbitMQ](https://img.shields.io/badge/queue-RabbitMQ-FF6600?logo=rabbitmq&logoColor=white)
+![vLLM](https://img.shields.io/badge/LLM%20serving-vLLM-5A2D81)
+![GPU](https://img.shields.io/badge/GPU-12GB%20VRAM-76B900?logo=nvidia&logoColor=white)
 
-The browser streams raw microphone audio to the orchestrator. The orchestrator
-segments speech with VAD, sends complete utterances through STT, LLM, and TTS,
-then streams synthesized audio back to the same WebSocket connection.
+A full **speech-to-speech** voice assistant: the browser streams raw mic audio to a Node.js
+WebSocket orchestrator, which segments speech with **VAD** and runs each utterance through
+**STT → LLM → TTS**, then streams synthesized audio back over the same connection — all on a
+single **12 GB** GPU.
+
+The interesting part is the **architecture evolution**: a monolithic, lock-serialized GPU pipeline
+(V1) was re-architected into **queue-backed worker services** behind RabbitMQ with **vLLM** serving
+the LLM (V2) — letting STT/TTS scale independently and cutting latency under load by **>50%**.
+
+### ⚡ Results at a glance
+
+Median end-to-end latency (end-of-upload → first audio reply), measured with the included benchmark
+harness ([`benchmarks/`](benchmarks/)):
+
+| Concurrent users | V1 (monolith) | V2 (queue + vLLM) | Improvement |
+| ---: | ---: | ---: | ---: |
+| 1 | 2192 ms | 1447 ms | **34% faster** |
+| 5 | 7006 ms | 3271 ms | **53% faster** |
+| 10 | 11627 ms | 5318 ms | **54% faster** |
+
+### Highlights
+
+- **Streaming voice loop** over a single WebSocket — VAD-gated STT → LLM → TTS → audio back.
+- **Queue-backed inference** (RabbitMQ `stt.jobs` / `tts.jobs` + reply queues, matched by `correlationId`).
+- **vLLM** serving the LLM via an OpenAI-compatible API; STT (Canary) and TTS (Kokoro) as dedicated GPU workers.
+- **Designed for one GPU PC** — bounded queues, one worker per heavy model, no duplicate model copies.
+- **Reproducible benchmarks** at 1/5/10 concurrency with per-stage (STT/LLM/TTS) compute-vs-wait timing.
 
 ## Current Goal
 
