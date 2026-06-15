@@ -56,6 +56,7 @@ class TtsRuntime:
             if audio is None or len(audio) == 0:
                 continue
             
-            pcm16 = (audio * 32767).astype(np.int16).tobytes()
+            audio_np = audio.cpu().numpy() if hasattr(audio, 'numpy') else np.asarray(audio)
+            pcm16 = (audio_np * 32767).astype(np.int16).tobytes()
 
             yield struct.pack("<I", len(pcm16)) + pcm16
