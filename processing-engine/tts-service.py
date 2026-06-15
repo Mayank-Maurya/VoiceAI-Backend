@@ -6,6 +6,7 @@ Run:
 Or:
     PYTHONPATH=. uvicorn tts_service:app --host 0.0.0.0 --port 7002
 """
+
 import asyncio
 import os
 from contextlib import asynccontextmanager
@@ -43,10 +44,17 @@ async def tts_stream(req: TtsRequest):
     if not text:
         raise HTTPException(status_code=400, detail="Empty text")
 
+    # Generate all chunks under the GPU lock in one threadpool call,
+    # then stream them out. This keeps GPU work contained in one thread
+    # and avoids the connection dropping mid-stream.
+    async with gpu_lock:
+        chunks = await run_in_threadpool(
+            lambda: list(runtime.generate_audio_chunks(text))
+        )
+
     async def generate():
-        async with gpu_lock:
-            for chunk in await run_in_threadpool(lambda: list(runtime.generate_audio_chunks(text))):
-                yield chunk
+        for chunk in chunks:
+            yield chunk
 
     return StreamingResponse(generate(), media_type="application/octet-stream")
 
