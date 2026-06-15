@@ -16,7 +16,8 @@
     "dotenv": "17.4.2",
     "node-vad": "^1.1.4",
     "ws": "^8.20.1",
-    "amqplib": "^0.10.5"
+    "amqplib": "^0.10.5",
+    "openai": "6.42.0"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
