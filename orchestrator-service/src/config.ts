@@ -76,6 +76,7 @@ export const ORCHESTRATOR_REPLY_QUEUE =
 export const STAGE_TIMEOUT_MS = Number(process.env.STAGE_TIMEOUT_MS ?? 30_000);
 
 export const VLLM_BASE_URL = process.env.VLLM_BASE_URL ?? `http://${REMOTE_IP}:8000`;
+export const TTS_STREAM_URL = process.env.TTS_STREAM_URL ?? `http://${REMOTE_IP}:7002`;
 export const VLLM_MODEL_ID =
     process.env.VLLM_MODEL_ID ?? "Qwen/Qwen2.5-0.5B-Instruct";
 

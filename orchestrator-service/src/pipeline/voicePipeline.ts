@@ -5,6 +5,7 @@ import {
     STAGE_TIMEOUT_MS,
     STT_JOBS_QUEUE,
     TTS_JOBS_QUEUE,
+    TTS_STREAM_URL,
 } from "../config";
 import { generateWavHeader } from "../audio/wav";
 import { rabbitRpcClient } from "../messaging/rabbitRpcClient";
@@ -52,69 +53,129 @@ export async function runVoicePipeline(session: ClientSession, rawPcm: Buffer): 
 
         console.log(`[${session.id}] USER: ${userText}`);
 
-        const llmStart = Date.now();
-        let firstTokenAt: number | null = null;
-        const sentences: string[] = [];
-
-        for await(const sentence of sentenceBuffer(streamLlmResponse(userText))) {
-            if (firstTokenAt === null) {
-                firstTokenAt = Date.now();
-            }
-            sentences.push(sentence);
-        }
-
-        const aiText = sentences.join("");
-
-        const llmMs = Date.now() - llmStart;
-        const ttftMs = firstTokenAt ? firstTokenAt - llmStart : 0;
-        console.log(`[${session.id}] AI: ${aiText}`);
-        console.log(
-            `[${session.id}] turn=${turnId} LLM streaming: ` +
-            `first_sentence=${ttftMs}ms total=${llmMs}ms sentences=${sentences.length}`
-        );
-
-        const ttsRequest = Buffer.from(
-            JSON.stringify({
-                stage: "tts",
-                sessionId: session.id,
-                turnId,
-                text: aiText,
-            }),
-            "utf8"
-        );
-
-        const ttsStart = Date.now();
-        const ttsWavBuffer = await rabbitRpcClient.request(TTS_JOBS_QUEUE, ttsRequest, {
-            timeoutMs: STAGE_TIMEOUT_MS,
-            contentType: "application/json",
-            headers: {
-                sessionId: session.id,
-                turnId,
-            },
-        });
-        const ttsMs = Date.now() - ttsStart;
-
-        if (!isWav(ttsWavBuffer)) {
-            console.error(
-                `[${session.id}] turn=${turnId} TTS returned non-WAV: ` +
-                ttsWavBuffer.toString("utf8").slice(0, 500)
-            );
-            return;
-        }
-
-        if (session.socket.readyState === session.socket.OPEN) {
-            session.socket.send(ttsWavBuffer);
-        }
-
-        const totalMs = Date.now() - startedAt;
-        console.log(
-            `[${session.id}] turn=${turnId} complete ` +
-            `STT=${sttMs}ms LLM=${llmMs}ms TTS=${ttsMs}ms total=${totalMs}ms`
-        );
+        // ── LLM streaming → sentence buffer → TTS streaming → browser ──
+        await streamTurnToClient(session, turnId, userText, sttMs, startedAt);
+        
     } catch (error) {
         console.error(`[${session.id}] turn=${turnId} failed`, error);
     }
 }
+
+async function streamTurnToClient(
+    session: ClientSession,
+    turnId: string,
+    userText: string,
+    sttMs: number,
+    startedAt: number
+): Promise<void> {
+    const llmStart = Date.now();
+    let firstSentenceAt: number | null = null;
+    let firstAudioAt: number | null = null;
+    let sentenceCount = 0;
+    let audioStartSent = false;
+
+    // Send audio_start control message before first audio chunk.
+    const sendAudioStart = () => {
+        if (audioStartSent) return;
+        audioStartSent = true;
+        if (session.socket.readyState === session.socket.OPEN) {
+            session.socket.send(JSON.stringify({
+                type: "audio_start",
+                sampleRate: 24000,
+                turnId,
+            }));
+        }
+    };
+
+
+    for await(const sentence of sentenceBuffer(streamLlmResponse(userText))) {
+        sentenceCount++;
+        if (firstSentenceAt === null) {
+            firstSentenceAt = Date.now();
+        }
+        console.log(`[${session.id}] turn=${turnId} TTS sentence ${sentenceCount}: "${sentence}"`);
+
+        await streamTtsToClient(session, sentence, () => {
+            sendAudioStart();
+            if (firstAudioAt === null) {
+                firstAudioAt = Date.now();
+            }
+        });
+    }
+
+    if (audioStartSent && session.socket.readyState === session.socket.OPEN) {
+        session.socket.send(JSON.stringify({ type: "audio_end", turnId }));
+    }
+
+    const totalMs = Date.now() - startedAt;
+    const ttfsMs = firstSentenceAt ? firstSentenceAt - llmStart : 0;
+    const ttfaMs = firstAudioAt ? firstAudioAt - startedAt : 0;
+
+    console.log(
+        `[${session.id}] turn=${turnId} complete ` +
+        `STT=${sttMs}ms TTFS=${ttfsMs}ms TTFA=${ttfaMs}ms ` +
+        `sentences=${sentenceCount} total=${totalMs}ms`
+    );
+}
+
+/**
+ * POST text to the TTS streaming service, read length-prefixed PCM16 chunks,
+ * and forward each chunk to the browser WebSocket as a binary frame.
+ */
+async function streamTtsToClient(
+    session: ClientSession,
+    text: string,
+    onFirstChunk: () => void,
+): Promise<void> {
+    const response = await fetch(`${TTS_STREAM_URL}/tts/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+    });
+
+    if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`TTS stream failed: ${response.status} ${body}`);
+    }
+
+    if (!response.body) {
+        throw new Error("TTS returned no response body");
+    }
+
+    const reader = response.body.getReader();
+    let pending = Buffer.alloc(0);
+    let isFirst = true;
+
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            pending = Buffer.concat([pending, Buffer.from(value)]);
+
+            // Parse length-prefixed chunks: [4-byte LE uint32 length][PCM16 bytes]
+            while (pending.length >= 4) {
+                const chunkLen = pending.readUInt32LE(0);
+                if (pending.length < 4 + chunkLen) break;
+
+                const pcmChunk = pending.subarray(4, 4 + chunkLen);
+                pending = pending.subarray(4 + chunkLen);
+
+                if (isFirst) {
+                    isFirst = false;
+                    onFirstChunk();
+                }
+
+                if (session.socket.readyState === session.socket.OPEN) {
+                    session.socket.send(pcmChunk);
+                }
+            }
+        }
+    } finally {
+        reader.releaseLock();
+    }
+}
+
 
 function isWav(buffer: Buffer): boolean {
     return (

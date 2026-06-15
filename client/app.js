@@ -5,7 +5,10 @@
   var DEFAULT_TARGET_SAMPLE_RATE = 16000;
   var DEFAULT_FRAME_DURATION_MS = 100;
   var WORKLET_URL = "./audio-worklet.js";
+  var PLAYBACK_WORKLET_URL = "./audio-playback-worklet.js";
   var MAX_BUFFERED_BYTES = 1024 * 1024;
+  var PLAYBACK_SAMPLE_RATE = 24000; // Kokoro output rate.
+  var PRE_BUFFER_SAMPLES = PLAYBACK_SAMPLE_RATE * 0.15; // 150ms pre-buffer.
 
   var config = window.VOICE_AI_CONFIG || {};
   var websocketUrl = config.WS_URL || DEFAULT_WS_URL;
@@ -35,12 +38,12 @@
   var stopRequested = false;
   var chunkCount = 0;
   var byteCount = 0;
-  var playbackQueue = [];
-  var isPlaying = false;
-  var currentPlayback = null;
   var activityTimer = null;
   var voiceState = "idle";
   var lastVoiceAt = 0;
+
+  // Streaming playback state.
+  var streamingPlayer = null;
 
   endpointValue.textContent = websocketUrl;
   formatValue.textContent = "PCM16 mono, " + targetSampleRate + " Hz";
@@ -61,10 +64,250 @@
 
   updateControls();
 
-  async function startStreaming() {
-    if (isStarting || audioContext) {
+  // ─── Streaming audio player ───
+
+  function StreamingAudioPlayer() {
+    this.playbackCtx = null;
+    this.workletNode = null;
+    this.isPlaying = false;
+    this.preBuffered = 0;
+    this.preBuffering = true;
+    this.pendingSamples = [];
+  }
+
+  StreamingAudioPlayer.prototype.init = async function (sampleRate) {
+    var rate = sampleRate || PLAYBACK_SAMPLE_RATE;
+
+    if (this.playbackCtx) {
+      await this.close();
+    }
+
+    this.playbackCtx = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: rate,
+    });
+
+    await this.playbackCtx.audioWorklet.addModule(PLAYBACK_WORKLET_URL);
+
+    this.workletNode = new AudioWorkletNode(
+      this.playbackCtx,
+      "streaming-playback-processor",
+      { processorOptions: { sampleRate: rate } }
+    );
+
+    this.workletNode.connect(this.playbackCtx.destination);
+
+    var self = this;
+    this.workletNode.port.onmessage = function (event) {
+      if (event.data.type === "ended") {
+        self.isPlaying = false;
+        restoreRecordingStatus();
+      }
+    };
+
+    this.isPlaying = false;
+    this.preBuffered = 0;
+    this.preBuffering = true;
+    this.pendingSamples = [];
+  };
+
+  StreamingAudioPlayer.prototype.pushPcm16 = function (arrayBuffer) {
+    if (!this.workletNode) return;
+
+    // Convert PCM16 (Int16) to Float32 for the AudioWorklet.
+    var int16 = new Int16Array(arrayBuffer);
+    var float32 = new Float32Array(int16.length);
+    for (var i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 32768;
+    }
+
+    if (this.preBuffering) {
+      this.pendingSamples.push(float32);
+      this.preBuffered += float32.length;
+
+      if (this.preBuffered >= PRE_BUFFER_SAMPLES) {
+        this.preBuffering = false;
+        this.workletNode.port.postMessage({ type: "start" });
+
+        for (var j = 0; j < this.pendingSamples.length; j++) {
+          this.workletNode.port.postMessage({
+            type: "samples",
+            samples: this.pendingSamples[j],
+          });
+        }
+        this.pendingSamples = [];
+        this.isPlaying = true;
+      }
       return;
     }
+
+    this.workletNode.port.postMessage({ type: "samples", samples: float32 });
+  };
+
+  StreamingAudioPlayer.prototype.drain = function () {
+    if (!this.workletNode) return;
+
+    // If still pre-buffering, flush whatever we have and start playback.
+    if (this.preBuffering && this.pendingSamples.length > 0) {
+      this.preBuffering = false;
+      this.workletNode.port.postMessage({ type: "start" });
+
+      for (var j = 0; j < this.pendingSamples.length; j++) {
+        this.workletNode.port.postMessage({
+          type: "samples",
+          samples: this.pendingSamples[j],
+        });
+      }
+      this.pendingSamples = [];
+      this.isPlaying = true;
+    }
+
+    this.workletNode.port.postMessage({ type: "drain" });
+  };
+
+  StreamingAudioPlayer.prototype.stop = function () {
+    if (this.workletNode) {
+      this.workletNode.port.postMessage({ type: "stop" });
+    }
+    this.isPlaying = false;
+    this.preBuffered = 0;
+    this.preBuffering = true;
+    this.pendingSamples = [];
+  };
+
+  StreamingAudioPlayer.prototype.close = async function () {
+    this.stop();
+    if (this.workletNode) {
+      this.workletNode.disconnect();
+      this.workletNode = null;
+    }
+    if (this.playbackCtx && this.playbackCtx.state !== "closed") {
+      await this.playbackCtx.close();
+    }
+    this.playbackCtx = null;
+  };
+
+  // ─── Socket message handling (supports both streaming and legacy WAV) ───
+
+  function handleSocketMessage(event) {
+    var data = event.data;
+
+    // Binary frame: either a legacy WAV or a streaming PCM16 chunk.
+    if (data instanceof ArrayBuffer) {
+      if (streamingPlayer && streamingPlayer.isPlaying || streamingPlayer && streamingPlayer.preBuffering) {
+        // We're in a streaming turn — this is a PCM16 chunk.
+        streamingPlayer.pushPcm16(data);
+        return;
+      }
+
+      // Legacy path: complete WAV.
+      enqueueAudioResponse(data);
+      return;
+    }
+
+    if (typeof Blob !== "undefined" && data instanceof Blob) {
+      data.arrayBuffer().then(function (buf) {
+        handleSocketMessage({ data: buf });
+      }).catch(function () {});
+      return;
+    }
+
+    // Text frame: JSON control message.
+    if (typeof data === "string") {
+      try {
+        var msg = JSON.parse(data);
+        handleControlMessage(msg);
+      } catch (e) {
+        // Not JSON — ignore.
+      }
+    }
+  }
+
+  function handleControlMessage(msg) {
+    if (msg.type === "audio_start") {
+      setStatus(recordingStatus, "Speaking", "speaking");
+      setVoiceState("speaking");
+      setActivity(0.72);
+
+      if (!streamingPlayer) {
+        streamingPlayer = new StreamingAudioPlayer();
+      }
+      streamingPlayer.init(msg.sampleRate || PLAYBACK_SAMPLE_RATE);
+      return;
+    }
+
+    if (msg.type === "audio_end") {
+      if (streamingPlayer) {
+        streamingPlayer.drain();
+      }
+      return;
+    }
+
+    if (msg.type === "audio_cancel") {
+      if (streamingPlayer) {
+        streamingPlayer.stop();
+      }
+      restoreRecordingStatus();
+      return;
+    }
+  }
+
+  // ─── Legacy WAV playback (kept for backward compat) ───
+
+  var playbackQueue = [];
+  var isPlaying = false;
+  var currentPlayback = null;
+
+  function enqueueAudioResponse(arrayBuffer) {
+    if (!arrayBuffer || arrayBuffer.byteLength === 0) return;
+    playbackQueue.push(arrayBuffer);
+    playNextResponse();
+  }
+
+  function playNextResponse() {
+    if (isPlaying) return;
+    var nextBuffer = playbackQueue.shift();
+    if (!nextBuffer) {
+      restoreRecordingStatus();
+      return;
+    }
+
+    isPlaying = true;
+    setStatus(recordingStatus, "Speaking", "speaking");
+    setVoiceState("speaking");
+    setActivity(0.72);
+
+    var objectUrl = URL.createObjectURL(new Blob([nextBuffer], { type: "audio/wav" }));
+    var audio = new Audio();
+    audio.src = objectUrl;
+    currentPlayback = audio;
+
+    var finished = false;
+    function finish() {
+      if (finished) return;
+      finished = true;
+      audio.removeEventListener("ended", finish);
+      audio.removeEventListener("error", finish);
+      URL.revokeObjectURL(objectUrl);
+      if (currentPlayback === audio) currentPlayback = null;
+      isPlaying = false;
+      playNextResponse();
+    }
+
+    audio.addEventListener("ended", finish);
+    audio.addEventListener("error", finish);
+    var playResult = audio.play();
+    if (playResult && typeof playResult.catch === "function") {
+      playResult.catch(function (error) {
+        showError("Could not play AI audio response: " + formatError(error));
+        finish();
+      });
+    }
+  }
+
+  // ─── Mic streaming (unchanged) ───
+
+  async function startStreaming() {
+    if (isStarting || audioContext) return;
 
     clearError();
     resetMetrics();
@@ -78,10 +321,7 @@
     try {
       assertBrowserSupport();
       socket = await openWebSocket(websocketUrl);
-      if (stopRequested) {
-        await stopStreaming("Stopped");
-        return;
-      }
+      if (stopRequested) { await stopStreaming("Stopped"); return; }
 
       attachSocketHandlers(socket);
       setStatus(connectionStatus, "Connected", "connected");
@@ -91,19 +331,13 @@
           channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
-        }
+          autoGainControl: true,
+        },
       });
-      if (stopRequested) {
-        await stopStreaming("Stopped");
-        return;
-      }
+      if (stopRequested) { await stopStreaming("Stopped"); return; }
 
       await setupAudioPipeline();
-      if (stopRequested) {
-        await stopStreaming("Stopped");
-        return;
-      }
+      if (stopRequested) { await stopStreaming("Stopped"); return; }
 
       sendStartMessage();
       connectAudioGraph();
@@ -112,9 +346,7 @@
     } catch (error) {
       var wasStopped = stopRequested;
       await stopStreaming("Idle");
-      if (!wasStopped) {
-        showError(formatError(error));
-      }
+      if (!wasStopped) showError(formatError(error));
     } finally {
       isStarting = false;
       updateControls();
@@ -123,7 +355,16 @@
 
   async function stopStreaming(label) {
     stopRequested = true;
+
+    // Stop streaming playback.
+    if (streamingPlayer) {
+      await streamingPlayer.close();
+      streamingPlayer = null;
+    }
+
+    // Stop legacy playback.
     stopPlayback();
+
     clearActivityTimer();
     setStatus(recordingStatus, "Stopping", "stopping");
     setVoiceState("connecting");
@@ -138,27 +379,16 @@
       workletNode = null;
     }
 
-    if (sourceNode) {
-      sourceNode.disconnect();
-      sourceNode = null;
-    }
-
-    if (muteNode) {
-      muteNode.disconnect();
-      muteNode = null;
-    }
+    if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+    if (muteNode) { muteNode.disconnect(); muteNode = null; }
 
     if (audioContext) {
-      if (audioContext.state !== "closed") {
-        await audioContext.close();
-      }
+      if (audioContext.state !== "closed") await audioContext.close();
       audioContext = null;
     }
 
     if (mediaStream) {
-      mediaStream.getTracks().forEach(function (track) {
-        track.stop();
-      });
+      mediaStream.getTracks().forEach(function (track) { track.stop(); });
       mediaStream = null;
     }
 
@@ -179,43 +409,24 @@
 
   function assertBrowserSupport() {
     var AudioContextClass = window.AudioContext || window.webkitAudioContext;
-
-    if (!window.WebSocket) {
-      throw new Error("This browser does not support WebSockets.");
-    }
-
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error("This browser cannot access microphone input.");
-    }
-
-    if (!AudioContextClass) {
-      throw new Error("This browser does not support Web Audio.");
-    }
+    if (!window.WebSocket) throw new Error("This browser does not support WebSockets.");
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("This browser cannot access microphone input.");
+    if (!AudioContextClass) throw new Error("This browser does not support Web Audio.");
   }
 
   async function setupAudioPipeline() {
     var AudioContextClass = window.AudioContext || window.webkitAudioContext;
-
     try {
-      audioContext = new AudioContextClass({
-        sampleRate: targetSampleRate
-      });
+      audioContext = new AudioContextClass({ sampleRate: targetSampleRate });
     } catch (error) {
       audioContext = new AudioContextClass();
     }
-
-    if (!audioContext.audioWorklet) {
-      throw new Error("This browser does not support AudioWorklet.");
-    }
-
+    if (!audioContext.audioWorklet) throw new Error("This browser does not support AudioWorklet.");
     await audioContext.audioWorklet.addModule(WORKLET_URL);
 
     sourceNode = audioContext.createMediaStreamSource(mediaStream);
     workletNode = new AudioWorkletNode(audioContext, "pcm16-stream-processor", {
-      processorOptions: {
-        targetSampleRate: targetSampleRate,
-        frameDurationMs: frameDurationMs
-      }
+      processorOptions: { targetSampleRate: targetSampleRate, frameDurationMs: frameDurationMs },
     });
     muteNode = audioContext.createGain();
     muteNode.gain.value = 0;
@@ -225,9 +436,7 @@
     workletNode.addEventListener("processorerror", handleWorkletProcessorError);
     workletNode.port.start();
 
-    if (audioContext.state === "suspended") {
-      await audioContext.resume();
-    }
+    if (audioContext.state === "suspended") await audioContext.resume();
   }
 
   function connectAudioGraph() {
@@ -237,63 +446,43 @@
   }
 
   function sendStartMessage() {
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      throw new Error("WebSocket is not open.");
-    }
-
+    if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error("WebSocket is not open.");
     socket.send(JSON.stringify({
       type: "start",
       format: "pcm_s16le",
       sampleRate: targetSampleRate,
       inputSampleRate: audioContext.sampleRate,
       channels: 1,
-      frameDurationMs: frameDurationMs
+      frameDurationMs: frameDurationMs,
     }));
   }
 
   function openWebSocket(url) {
     return new Promise(function (resolve, reject) {
       var pendingSocket;
-
       try {
         pendingSocket = new WebSocket(url);
         pendingSocket.binaryType = "arraybuffer";
         socket = pendingSocket;
-      } catch (error) {
-        reject(error);
-        return;
-      }
+      } catch (error) { reject(error); return; }
 
       var settled = false;
-
       function cleanup() {
         pendingSocket.removeEventListener("open", handleOpen);
         pendingSocket.removeEventListener("error", handleError);
         pendingSocket.removeEventListener("close", handleClose);
       }
-
       function settle(callback, value) {
-        if (settled) {
-          return;
-        }
+        if (settled) return;
         settled = true;
         cleanup();
         callback(value);
       }
-
-      function handleOpen() {
-        settle(resolve, pendingSocket);
-      }
-
-      function handleError() {
-        settle(reject, new Error("WebSocket connection failed."));
-      }
-
+      function handleOpen() { settle(resolve, pendingSocket); }
+      function handleError() { settle(reject, new Error("WebSocket connection failed.")); }
       function handleClose(event) {
-        var reason = event.reason || "WebSocket closed before recording started.";
-        settle(reject, new Error(reason));
+        settle(reject, new Error(event.reason || "WebSocket closed before recording started."));
       }
-
       pendingSocket.addEventListener("open", handleOpen);
       pendingSocket.addEventListener("error", handleError);
       pendingSocket.addEventListener("close", handleClose);
@@ -312,86 +501,8 @@
     activeSocket.removeEventListener("error", handleSocketError);
   }
 
-  // Incoming server messages: binary frames are the AI's TTS audio (WAV).
-  function handleSocketMessage(event) {
-    var data = event.data;
-
-    if (data instanceof ArrayBuffer) {
-      enqueueAudioResponse(data);
-      return;
-    }
-
-    if (typeof Blob !== "undefined" && data instanceof Blob) {
-      data.arrayBuffer().then(enqueueAudioResponse).catch(function () {});
-      return;
-    }
-
-    // Text/JSON control messages are not used yet; ignore them.
-  }
-
-  function enqueueAudioResponse(arrayBuffer) {
-    if (!arrayBuffer || arrayBuffer.byteLength === 0) {
-      return;
-    }
-
-    playbackQueue.push(arrayBuffer);
-    playNextResponse();
-  }
-
-  // Plays queued responses one after another so replies never overlap.
-  function playNextResponse() {
-    if (isPlaying) {
-      return;
-    }
-
-    var nextBuffer = playbackQueue.shift();
-    if (!nextBuffer) {
-      restoreRecordingStatus();
-      return;
-    }
-
-    isPlaying = true;
-    setStatus(recordingStatus, "Speaking", "speaking");
-    setVoiceState("speaking");
-    setActivity(0.72);
-
-    var objectUrl = URL.createObjectURL(new Blob([nextBuffer], { type: "audio/wav" }));
-    var audio = new Audio();
-    audio.src = objectUrl;
-    currentPlayback = audio;
-
-    var finished = false;
-    function finish() {
-      if (finished) {
-        return;
-      }
-      finished = true;
-      audio.removeEventListener("ended", finish);
-      audio.removeEventListener("error", finish);
-      URL.revokeObjectURL(objectUrl);
-      if (currentPlayback === audio) {
-        currentPlayback = null;
-      }
-      isPlaying = false;
-      playNextResponse();
-    }
-
-    audio.addEventListener("ended", finish);
-    audio.addEventListener("error", finish);
-
-    var playResult = audio.play();
-    if (playResult && typeof playResult.catch === "function") {
-      playResult.catch(function (error) {
-        showError("Could not play AI audio response: " + formatError(error));
-        finish();
-      });
-    }
-  }
-
   function restoreRecordingStatus() {
-    if (stopRequested || !audioContext) {
-      return;
-    }
+    if (stopRequested || !audioContext) return;
     setStatus(recordingStatus, "Recording", "recording");
     setVoiceState("listening");
   }
@@ -400,11 +511,7 @@
     playbackQueue = [];
     isPlaying = false;
     if (currentPlayback) {
-      try {
-        currentPlayback.pause();
-      } catch (error) {
-        // Ignore teardown errors.
-      }
+      try { currentPlayback.pause(); } catch (e) {}
       currentPlayback.src = "";
       currentPlayback = null;
     }
@@ -412,24 +519,16 @@
 
   function handleWorkletMessage(event) {
     var message = event.data;
-
-    if (!message || message.type !== "pcm" || !(message.buffer instanceof ArrayBuffer)) {
-      return;
-    }
-
+    if (!message || message.type !== "pcm" || !(message.buffer instanceof ArrayBuffer)) return;
     sendPcmFrame(message.buffer);
   }
 
   function sendPcmFrame(buffer) {
-    if (stopRequested) {
-      return;
-    }
+    if (stopRequested) return;
 
-    // Drop mic frames while the AI is speaking to prevent the VAD from
-    // picking up the speaker output and looping it back as user input.
-    if (isPlaying) {
-      return;
-    }
+    // Drop mic frames while the AI is speaking.
+    var isSpeaking = isPlaying || (streamingPlayer && streamingPlayer.isPlaying);
+    if (isSpeaking) return;
 
     updateVoiceActivity(buffer);
 
@@ -438,7 +537,6 @@
       showError("WebSocket is not open. Audio streaming stopped.");
       return;
     }
-
     if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
       stopStreaming("Stopped");
       showError("WebSocket is buffering too much audio. Streaming stopped.");
@@ -501,9 +599,7 @@
   function setStatus(element, text, state) {
     element.textContent = text;
     element.dataset.state = state;
-    if (element === connectionStatus && voiceStage) {
-      voiceStage.dataset.connectionState = state;
-    }
+    if (element === connectionStatus && voiceStage) voiceStage.dataset.connectionState = state;
   }
 
   function showError(message) {
@@ -518,102 +614,41 @@
     errorMessage.hidden = true;
   }
 
-  function formatError(error) {
-    if (!error) {
-      return "Unknown error.";
-    }
-    return error.message || String(error);
-  }
-
-  function formatCloseCode(event) {
-    return event && event.code ? " (" + event.code + ")" : "";
-  }
-
+  function formatError(error) { return error ? (error.message || String(error)) : "Unknown error."; }
+  function formatCloseCode(event) { return event && event.code ? " (" + event.code + ")" : ""; }
   function formatBytes(bytes) {
-    if (bytes < 1024) {
-      return bytes + " B";
-    }
-
-    if (bytes < 1024 * 1024) {
-      return (bytes / 1024).toFixed(1) + " KB";
-    }
-
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
     return (bytes / (1024 * 1024)).toFixed(2) + " MB";
   }
 
   function setVoiceState(state) {
     voiceState = state;
-    if (voiceStage) {
-      voiceStage.dataset.voiceState = state;
-    }
-
+    if (voiceStage) voiceStage.dataset.voiceState = state;
     var copy = getVoiceCopy(state);
-    if (primaryStatus) {
-      primaryStatus.textContent = copy.title;
-    }
-    if (statusHint) {
-      statusHint.textContent = copy.hint;
-    }
+    if (primaryStatus) primaryStatus.textContent = copy.title;
+    if (statusHint) statusHint.textContent = copy.hint;
   }
 
   function getVoiceCopy(state) {
-    if (state === "connecting") {
-      return {
-        title: "Opening channel",
-        hint: "Preparing the live voice stream."
-      };
-    }
-
-    if (state === "listening") {
-      return {
-        title: "Listening",
-        hint: "I am listening."
-      };
-    }
-
-    if (state === "thinking") {
-      return {
-        title: "Thinking",
-        hint: "Working on your last phrase."
-      };
-    }
-
-    if (state === "speaking") {
-      return {
-        title: "Speaking",
-        hint: "Response is playing."
-      };
-    }
-
-    if (state === "error") {
-      return {
-        title: "Needs attention",
-        hint: "Something interrupted the stream."
-      };
-    }
-
-    return {
-      title: "Ready when you are",
-      hint: "The room is quiet."
-    };
+    if (state === "connecting") return { title: "Opening channel", hint: "Preparing the live voice stream." };
+    if (state === "listening") return { title: "Listening", hint: "I am listening." };
+    if (state === "thinking") return { title: "Thinking", hint: "Working on your last phrase." };
+    if (state === "speaking") return { title: "Speaking", hint: "Response is playing." };
+    if (state === "error") return { title: "Needs attention", hint: "Something interrupted the stream." };
+    return { title: "Ready when you are", hint: "The room is quiet." };
   }
 
   function updateVoiceActivity(buffer) {
     var level = measurePcmActivity(buffer);
     setActivity(level);
-
-    if (!audioContext || stopRequested || voiceState === "speaking") {
-      return;
-    }
-
+    if (!audioContext || stopRequested || voiceState === "speaking") return;
     if (level > 0.08) {
       lastVoiceAt = Date.now();
       clearActivityTimer();
-      if (voiceState !== "listening") {
-        setVoiceState("listening");
-      }
+      if (voiceState !== "listening") setVoiceState("listening");
       activityTimer = setTimeout(function () {
-        if (!stopRequested && audioContext && !isPlaying && Date.now() - lastVoiceAt >= 800) {
+        if (!stopRequested && audioContext && !isPlaying && !(streamingPlayer && streamingPlayer.isPlaying) && Date.now() - lastVoiceAt >= 800) {
           setVoiceState("thinking");
           setActivity(0.16);
         }
@@ -622,32 +657,23 @@
   }
 
   function measurePcmActivity(buffer) {
-    if (!buffer || buffer.byteLength < 2) {
-      return 0;
-    }
-
+    if (!buffer || buffer.byteLength < 2) return 0;
     var samples = new Int16Array(buffer);
     var sum = 0;
-    for (var i = 0; i < samples.length; i += 1) {
+    for (var i = 0; i < samples.length; i++) {
       var value = samples[i] / 32768;
       sum += value * value;
     }
-
     var rms = Math.sqrt(sum / samples.length);
     return Math.max(0, Math.min(1, rms * 8));
   }
 
   function setActivity(value) {
-    if (!voiceStage) {
-      return;
-    }
+    if (!voiceStage) return;
     voiceStage.style.setProperty("--activity", String(Math.max(0, Math.min(1, value))));
   }
 
   function clearActivityTimer() {
-    if (activityTimer) {
-      clearTimeout(activityTimer);
-      activityTimer = null;
-    }
+    if (activityTimer) { clearTimeout(activityTimer); activityTimer = null; }
   }
 })();
