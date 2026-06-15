@@ -3,6 +3,7 @@
 import asyncio
 import io
 from typing import Any, Generator
+import struct
 
 import numpy as np
 import soundfile as sf
