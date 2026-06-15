@@ -9,9 +9,10 @@ class StreamingPlaybackProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
 
-    // Ring buffer: 2 seconds at the given sample rate.
+    // Ring buffer: 60 seconds at the given sample rate (~5.5MB).
+    // Must be large enough to hold all audio pushed faster than real-time.
     const sampleRate = options.processorOptions?.sampleRate ?? 24000;
-    this._bufferSize = sampleRate * 2;
+    this._bufferSize = sampleRate * 60;
     this._buffer = new Float32Array(this._bufferSize);
     this._writePos = 0;
     this._readPos = 0;

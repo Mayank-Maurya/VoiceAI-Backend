@@ -8,7 +8,7 @@
   var PLAYBACK_WORKLET_URL = "./audio-playback-worklet.js";
   var MAX_BUFFERED_BYTES = 1024 * 1024;
   var PLAYBACK_SAMPLE_RATE = 24000; // Kokoro output rate.
-  var PRE_BUFFER_SAMPLES = PLAYBACK_SAMPLE_RATE * 0.15; // 150ms pre-buffer.
+  var PRE_BUFFER_SAMPLES = PLAYBACK_SAMPLE_RATE * 0.05; // 50ms pre-buffer.
 
   var config = window.VOICE_AI_CONFIG || {};
   var websocketUrl = config.WS_URL || DEFAULT_WS_URL;
@@ -44,6 +44,8 @@
 
   // Streaming playback state.
   var streamingPlayer = null;
+  var streamingReady = false;
+  var streamingPendingChunks = [];
 
   endpointValue.textContent = websocketUrl;
   formatValue.textContent = "PCM16 mono, " + targetSampleRate + " Hz";
@@ -129,10 +131,8 @@
         this.workletNode.port.postMessage({ type: "start" });
 
         for (var j = 0; j < this.pendingSamples.length; j++) {
-          this.workletNode.port.postMessage({
-            type: "samples",
-            samples: this.pendingSamples[j],
-          });
+          var s = this.pendingSamples[j];
+          this.workletNode.port.postMessage({ type: "samples", samples: s }, [s.buffer]);
         }
         this.pendingSamples = [];
         this.isPlaying = true;
@@ -140,7 +140,7 @@
       return;
     }
 
-    this.workletNode.port.postMessage({ type: "samples", samples: float32 });
+    this.workletNode.port.postMessage({ type: "samples", samples: float32 }, [float32.buffer]);
   };
 
   StreamingAudioPlayer.prototype.drain = function () {
@@ -152,10 +152,8 @@
       this.workletNode.port.postMessage({ type: "start" });
 
       for (var j = 0; j < this.pendingSamples.length; j++) {
-        this.workletNode.port.postMessage({
-          type: "samples",
-          samples: this.pendingSamples[j],
-        });
+        var s = this.pendingSamples[j];
+        this.workletNode.port.postMessage({ type: "samples", samples: s }, [s.buffer]);
       }
       this.pendingSamples = [];
       this.isPlaying = true;
@@ -193,9 +191,13 @@
 
     // Binary frame: either a legacy WAV or a streaming PCM16 chunk.
     if (data instanceof ArrayBuffer) {
-      if (streamingPlayer && streamingPlayer.isPlaying || streamingPlayer && streamingPlayer.preBuffering) {
-        // We're in a streaming turn — this is a PCM16 chunk.
-        streamingPlayer.pushPcm16(data);
+      if (streamingPlayer) {
+        if (streamingReady) {
+          streamingPlayer.pushPcm16(data);
+        } else {
+          // Worklet still loading — queue chunks for when it's ready.
+          streamingPendingChunks.push(data);
+        }
         return;
       }
 
@@ -228,10 +230,22 @@
       setVoiceState("speaking");
       setActivity(0.72);
 
+      streamingReady = false;
+      streamingPendingChunks = [];
+
       if (!streamingPlayer) {
         streamingPlayer = new StreamingAudioPlayer();
       }
-      streamingPlayer.init(msg.sampleRate || PLAYBACK_SAMPLE_RATE);
+      streamingPlayer.init(msg.sampleRate || PLAYBACK_SAMPLE_RATE).then(function () {
+        streamingReady = true;
+        // Flush any chunks that arrived while the worklet was loading.
+        if (streamingPlayer) {
+          for (var i = 0; i < streamingPendingChunks.length; i++) {
+            streamingPlayer.pushPcm16(streamingPendingChunks[i]);
+          }
+        }
+        streamingPendingChunks = [];
+      });
       return;
     }
 
@@ -246,6 +260,8 @@
       if (streamingPlayer) {
         streamingPlayer.stop();
       }
+      streamingReady = false;
+      streamingPendingChunks = [];
       restoreRecordingStatus();
       return;
     }
@@ -361,6 +377,8 @@
       await streamingPlayer.close();
       streamingPlayer = null;
     }
+    streamingReady = false;
+    streamingPendingChunks = [];
 
     // Stop legacy playback.
     stopPlayback();
