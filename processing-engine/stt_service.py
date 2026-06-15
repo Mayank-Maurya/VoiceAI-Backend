@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import time
+from contextlib import asynccontextmanager
 
 import numpy as np
 import uvicorn
@@ -25,12 +26,14 @@ STABLE_DURATION = 0.3
 runtime = SttRuntime()
 gpu_lock = asyncio.Lock()
 
-app = FastAPI(title="VoiceAI STT Streaming Service")
 
-
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     await run_in_threadpool(runtime.load)
+    yield
+
+
+app = FastAPI(title="VoiceAI STT Streaming Service", lifespan=lifespan)
 
 
 @app.get("/health")
