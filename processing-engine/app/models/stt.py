@@ -1,45 +1,54 @@
-"""Speech-to-text runtime using NVIDIA Canary (SALM)."""
+"""Speech-to-text runtime using faster-whisper (CTranslate2)."""
 
-import asyncio
-from typing import Any
+import numpy as np
+from faster_whisper import WhisperModel
 
-import torch
+from app.config import STT_MODEL_NAME
 
-from app.compat import apply_nemo_compat
-from app.config import STT_MAX_NEW_TOKENS, STT_MODEL_NAME
+# Default to "medium" if config still has the old Canary model name.
+WHISPER_MODEL = STT_MODEL_NAME if "whisper" in STT_MODEL_NAME or "/" not in STT_MODEL_NAME else "medium"
 
-# Patch NeMo before importing/using SALM so config access stays safe.
-apply_nemo_compat()
-
-from nemo.collections.speechlm2.models import SALM  # noqa: E402
 
 class SttRuntime:
     def __init__(self) -> None:
-        self.model: Any | None = None
-        self.lock = asyncio.Lock()
+        self.model: WhisperModel | None = None
 
     def load(self) -> None:
         if self.model is not None:
             return
 
-        print(f"Loading STT model: {STT_MODEL_NAME}...", flush=True)
-        self.model = SALM.from_pretrained(STT_MODEL_NAME).bfloat16().eval()
+        print(f"Loading STT model: faster-whisper {WHISPER_MODEL} (int8)...", flush=True)
+        self.model = WhisperModel(
+            WHISPER_MODEL,
+            device="cuda",
+            compute_type="int8",
+        )
+        print("STT loaded into VRAM.", flush=True)
 
-        if torch.cuda.is_available():
-            self.model = self.model.cuda()
-            print("STT loaded into VRAM.")
-
-    def transcribe_file(self, audio_path: str) -> str:
+    def transcribe_buffer(self, audio_np: np.ndarray) -> str:
+        """Transcribe a numpy float32 audio array (16kHz mono)."""
         if self.model is None:
             raise RuntimeError("STT model is not loaded")
 
-        prompts = [[{
-            "role": "user",
-            "content": f"Transcribe the following: {self.model.audio_locator_tag}",
-            "audio": [audio_path],
-        }]]
+        segments, _ = self.model.transcribe(
+            audio_np,
+            beam_size=1,
+            language="en",
+            vad_filter=False,
+        )
 
-        with torch.no_grad():
-            answer_ids = self.model.generate(prompts=prompts, max_new_tokens=STT_MAX_NEW_TOKENS)
+        return " ".join(seg.text.strip() for seg in segments).strip()
 
-        return self.model.tokenizer.ids_to_text(answer_ids[0].cpu()).strip()
+    def transcribe_file(self, audio_path: str) -> str:
+        """Transcribe from a file path (kept for backward compat with STT worker)."""
+        if self.model is None:
+            raise RuntimeError("STT model is not loaded")
+
+        segments, _ = self.model.transcribe(
+            audio_path,
+            beam_size=1,
+            language="en",
+            vad_filter=False,
+        )
+
+        return " ".join(seg.text.strip() for seg in segments).strip()
