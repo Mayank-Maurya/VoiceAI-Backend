@@ -8,7 +8,8 @@ import {
 } from "../config";
 import { generateWavHeader } from "../audio/wav";
 import { rabbitRpcClient } from "../messaging/rabbitRpcClient";
-import { generateLlmResponse } from "./vllmClient";
+import { generateLlmResponse, streamLlmResponse } from "./vllmClient";
+import { sentenceBuffer } from "./sentenceBuffer";
 
 type SttReply = {
     stage: "stt";
@@ -52,9 +53,25 @@ export async function runVoicePipeline(session: ClientSession, rawPcm: Buffer): 
         console.log(`[${session.id}] USER: ${userText}`);
 
         const llmStart = Date.now();
-        const aiText = await generateLlmResponse(userText);
+        let firstTokenAt: number | null = null;
+        const sentences: string[] = [];
+
+        for await(const sentence of sentenceBuffer(streamLlmResponse(userText))) {
+            if (firstTokenAt === null) {
+                firstTokenAt = Date.now();
+            }
+            sentences.push(sentence);
+        }
+
+        const aiText = sentences.join("");
+
         const llmMs = Date.now() - llmStart;
+        const ttftMs = firstTokenAt ? firstTokenAt - llmStart : 0;
         console.log(`[${session.id}] AI: ${aiText}`);
+        console.log(
+            `[${session.id}] turn=${turnId} LLM streaming: ` +
+            `first_sentence=${ttftMs}ms total=${llmMs}ms sentences=${sentences.length}`
+        );
 
         const ttsRequest = Buffer.from(
             JSON.stringify({
