@@ -51,7 +51,11 @@ def build_frames(pcm: bytes, trailing_silence_frames: int) -> list[bytes]:
 
 
 async def run_one(url: str, frames: list[bytes], timeout: float, realtime: bool) -> dict:
-    """Drive a single simulated client; return its latency measurements."""
+    """Drive a single simulated client; return its latency measurements.
+
+    Handles both the old protocol (single binary WAV reply) and the new
+    streaming protocol (JSON audio_start → binary PCM chunks → JSON audio_end).
+    """
     try:
         import websockets
     except ImportError:
@@ -76,25 +80,38 @@ async def run_one(url: str, frames: list[bytes], timeout: float, realtime: bool)
                     await asyncio.sleep(FRAME_MS / 1000)
             send_done = time.perf_counter()
 
-            # Wait for the first binary message (the TTS WAV reply).
-            reply = None
+            first_audio_at = None
+            total_audio_bytes = 0
             deadline = time.perf_counter() + timeout
+
             while True:
                 remaining = deadline - time.perf_counter()
                 if remaining <= 0:
                     return {"ok": False, "error": "timeout"}
                 msg = await asyncio.wait_for(ws.recv(), timeout=remaining)
+
                 if isinstance(msg, (bytes, bytearray)):
-                    reply = msg
-                    break
+                    if first_audio_at is None:
+                        first_audio_at = time.perf_counter()
+                    total_audio_bytes += len(msg)
+                elif isinstance(msg, str):
+                    try:
+                        ctrl = json.loads(msg)
+                        if ctrl.get("type") == "audio_end":
+                            break
+                    except json.JSONDecodeError:
+                        pass
 
             recv_done = time.perf_counter()
+
+            if first_audio_at is None:
+                return {"ok": False, "error": "no audio received"}
+
             return {
                 "ok": True,
-                "reply_bytes": len(reply),
-                # Time from finishing the upload to hearing back ~= system latency.
+                "reply_bytes": total_audio_bytes,
+                "ttfa_ms": (first_audio_at - send_done) * 1000,
                 "latency_ms": (recv_done - send_done) * 1000,
-                # Wall time for the whole exchange (includes the upload itself).
                 "total_ms": (recv_done - send_start) * 1000,
             }
     except Exception as exc:  # noqa: BLE001 - report any client failure as a failed run
@@ -115,9 +132,18 @@ def summarize(level: int, results: list[dict], wall: float) -> None:
     print(f"  success: {len(ok)}/{len(results)}   wall: {wall:.2f}s")
 
     if ok:
+        ttfa = sorted(r["ttfa_ms"] for r in ok if "ttfa_ms" in r)
         lat = sorted(r["latency_ms"] for r in ok)
+
+        if ttfa:
+            print(
+                "  TTFA (end-of-upload -> first audio byte): "
+                f"min={ttfa[0]:.0f}  median={statistics.median(ttfa):.0f}  "
+                f"mean={statistics.mean(ttfa):.0f}  p95={percentile(ttfa, 95):.0f}  "
+                f"max={ttfa[-1]:.0f}  (ms)"
+            )
         print(
-            "  latency (end-of-upload -> reply): "
+            "  latency (end-of-upload -> last audio byte): "
             f"min={lat[0]:.0f}  median={statistics.median(lat):.0f}  "
             f"mean={statistics.mean(lat):.0f}  p95={percentile(lat, 95):.0f}  "
             f"max={lat[-1]:.0f}  (ms)"
@@ -129,7 +155,7 @@ def summarize(level: int, results: list[dict], wall: float) -> None:
 
 
 CSV_FIELDS = [
-    "timestamp", "label", "level", "request", "ok", "latency_ms", "total_ms", "reply_bytes", "error"
+    "timestamp", "label", "level", "request", "ok", "ttfa_ms", "latency_ms", "total_ms", "reply_bytes", "error"
 ]
 
 
@@ -148,6 +174,7 @@ def append_csv(path: str, label: str, level: int, results: list[dict]) -> None:
                 "level": level,
                 "request": i,
                 "ok": r["ok"],
+                "ttfa_ms": f"{r['ttfa_ms']:.1f}" if r.get("ttfa_ms") else "",
                 "latency_ms": f"{r['latency_ms']:.1f}" if r["ok"] else "",
                 "total_ms": f"{r['total_ms']:.1f}" if r["ok"] else "",
                 "reply_bytes": r.get("reply_bytes", ""),

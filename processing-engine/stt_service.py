@@ -69,7 +69,7 @@ async def stt_websocket(ws: WebSocket):
             await ws.send_json({"text": text, "is_final": False})
 
     async def check_final():
-        nonlocal last_transcript, audio_buffer, silence_signaled, has_audio
+        nonlocal last_transcript, last_change_at, audio_buffer, silence_signaled, has_audio
 
         if not last_transcript:
             return
