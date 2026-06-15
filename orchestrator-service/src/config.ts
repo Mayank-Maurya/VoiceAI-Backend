@@ -3,13 +3,16 @@ import crypto from "node:crypto";
 
 dotenv.config();
 
+// --- Remote GPU machine ---
+const REMOTE_IP = process.env.REMOTE_IP ?? "192.168.1.3";
+
 // --- HTTP / WebSocket server ---
 export const PORT = Number(process.env.PORT ?? 3000);
 export const WS_PATH = "/ws/audio";
 
 // --- Downstream processing engine (STT -> LLM -> TTS) ---
 export const PROCESSING_ENGINE_URL =
-    process.env.PROCESSING_ENGINE_URL ?? "http://192.168.1.9:7001";
+    process.env.PROCESSING_ENGINE_URL ?? `http://${REMOTE_IP}:7001`;
 
 // --- Audio format: 16 kHz, 16-bit (2 bytes per sample), mono PCM ---
 export const SAMPLE_RATE = 16_000;
@@ -59,7 +62,7 @@ function clampVadMode(value: number): 0 | 1 | 2 | 3 {
     return clamped as 0 | 1 | 2 | 3;
 }
 
-export const RABBITMQ_URL = process.env.RABBITMQ_URL ?? "amqp://voiceai:voiceai_password@192.168.1.6:5672";
+export const RABBITMQ_URL = process.env.RABBITMQ_URL ?? `amqp://voiceai:voiceai_password@${REMOTE_IP}:5672`;
 
 export const ORCHESTRATOR_INSTANCE_ID =
     process.env.ORCHESTRATOR_INSTANCE_ID ?? `orchestrator-${crypto.randomUUID()}`;
@@ -72,7 +75,7 @@ export const ORCHESTRATOR_REPLY_QUEUE =
 
 export const STAGE_TIMEOUT_MS = Number(process.env.STAGE_TIMEOUT_MS ?? 30_000);
 
-export const VLLM_BASE_URL = process.env.VLLM_BASE_URL ?? "http://192.168.1.6:8000";
+export const VLLM_BASE_URL = process.env.VLLM_BASE_URL ?? `http://${REMOTE_IP}:8000`;
 export const VLLM_MODEL_ID =
     process.env.VLLM_MODEL_ID ?? "Qwen/Qwen2.5-0.5B-Instruct";
 
