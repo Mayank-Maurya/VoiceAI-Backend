@@ -2,366 +2,222 @@
 
 ![Node.js](https://img.shields.io/badge/Node.js-orchestrator-339933?logo=node.js&logoColor=white)
 ![WebSockets](https://img.shields.io/badge/transport-WebSockets-blue)
-![RabbitMQ](https://img.shields.io/badge/queue-RabbitMQ-FF6600?logo=rabbitmq&logoColor=white)
+![faster-whisper](https://img.shields.io/badge/STT-faster--whisper-orange)
 ![vLLM](https://img.shields.io/badge/LLM%20serving-vLLM-5A2D81)
+![Kokoro](https://img.shields.io/badge/TTS-Kokoro--82M-22c55e)
 ![GPU](https://img.shields.io/badge/GPU-12GB%20VRAM-76B900?logo=nvidia&logoColor=white)
 
-A full **speech-to-speech** voice assistant: the browser streams raw mic audio to a Node.js
-WebSocket orchestrator, which segments speech with **VAD** and runs each utterance through
-**STT → LLM → TTS**, then streams synthesized audio back over the same connection — all on a
-single **12 GB** GPU.
+A full **speech-to-speech** voice assistant. The browser streams raw mic audio to a Node.js
+WebSocket orchestrator, which runs a **fully streaming** pipeline — **streaming STT → streaming
+LLM → streaming TTS** — and plays synthesized audio back over the same connection while the rest
+of the response is still being generated. Everything runs on a single **12 GB** GPU.
 
-The interesting part is the **architecture evolution**: a monolithic, lock-serialized GPU pipeline
-(V1) was re-architected into **queue-backed worker services** behind RabbitMQ with **vLLM** serving
-the LLM (V2) — letting STT/TTS scale independently and cutting latency under load by **>50%**.
+The interesting part is the **architecture evolution**:
+
+- **V1** — a monolithic, lock-serialized GPU pipeline (one FastAPI service, STT→LLM→TTS sequential).
+- **V2** — re-architected into queue-backed worker services behind RabbitMQ with **vLLM** serving the LLM. ~50% lower latency under load.
+- **V3** — **end-to-end streaming**. VAD removed, RabbitMQ removed from the hot path, STT replaced with streaming faster-whisper. Every stage overlaps, so the user hears the first words while the LLM is still generating the rest.
 
 ### ⚡ Results at a glance
 
-Median end-to-end latency (end-of-upload → first audio reply), measured with the included benchmark
-harness ([`benchmarks/`](benchmarks/)):
+V3 is a streaming system, so the metric that matters is **TTFA — Time To First Audio byte** (how
+long until the user starts *hearing* the reply), not end-to-end time for the whole reply.
 
-| Concurrent users | V1 (monolith) | V2 (queue + vLLM) | Improvement |
-| ---: | ---: | ---: | ---: |
-| 1 | 2192 ms | 1447 ms | **34% faster** |
-| 5 | 7006 ms | 3271 ms | **53% faster** |
-| 10 | 11627 ms | 5318 ms | **54% faster** |
+| Metric | V1 (monolith) | V2 (queue + vLLM) | V3 (streaming) |
+| --- | ---: | ---: | ---: |
+| Endpointing | VAD (~800 ms tax) | VAD (~800 ms tax) | **energy gate (no model)** |
+| STT | Canary (batch) | Canary (queued) | **faster-whisper (streaming)** |
+| Latency metric | end-to-end | end-to-end | **TTFA** |
+| 1-user latency | 2192 ms | 1447 ms | **~165 ms TTFA** |
+| 10-user throughput | 0.65 rps | 1.19 rps | **1.53 rps** |
+
+At 1 user, time-to-first-audio dropped roughly **10×** versus V1's end-to-end latency — the win
+comes from streaming overlap plus deleting the 800 ms VAD hangover, not from a hardware upgrade.
 
 ### Highlights
 
-- **Streaming voice loop** over a single WebSocket — VAD-gated STT → LLM → TTS → audio back.
-- **Queue-backed inference** (RabbitMQ `stt.jobs` / `tts.jobs` + reply queues, matched by `correlationId`).
-- **vLLM** serving the LLM via an OpenAI-compatible API; STT (Canary) and TTS (Kokoro) as dedicated GPU workers.
-- **Designed for one GPU PC** — bounded queues, one worker per heavy model, no duplicate model copies.
-- **Reproducible benchmarks** at 1/5/10 concurrency with per-stage (STT/LLM/TTS) compute-vs-wait timing.
+- **Fully streaming voice loop** over a single WebSocket — energy-gated audio → streaming STT → streaming LLM (SSE) → sentence-buffered streaming TTS → gapless browser playback.
+- **No VAD model** — a simple RMS energy gate forwards audio to the STT service and signals silence; the STT decides utterance boundaries from transcript stability.
+- **Barge-in** — speak while the assistant is talking and the current turn is cancelled mid-stream (LLM + TTS aborted, browser playback stopped).
+- **Conversation memory** — last 10 turns are passed to the LLM each turn.
+- **vLLM** serving the LLM via an OpenAI-compatible API with continuous batching.
+- **Designed for one GPU PC** — three lightweight services (~5 GB VRAM total on a 12 GB card), no duplicate model copies.
 
-## Current Goal
+## Target Machine
 
-The project is transitioning from a single monolithic GPU processing service
-to a queue-backed V2 architecture that can use one GPU PC more efficiently
-today and scale into service pools later.
+The local target machine is intentionally modest:
 
-The current local target machine is intentionally modest:
-
-- NVIDIA GPU with 12 GB VRAM
+- NVIDIA GPU with 12 GB VRAM (benchmarked on an RTX 3060)
 - 16 GB system RAM
-- AMD CPU
-- RabbitMQ, STT worker, TTS worker, and vLLM running on the GPU PC
-- Node orchestrator may run on the same machine or another machine on the LAN
+- STT service, TTS service, and vLLM run on the GPU PC
+- The Node orchestrator runs on the same machine or another machine on the LAN
 
-The main rule for this machine is simple: do not create multiple heavy GPU model
-copies. Use one worker per heavy model, bounded queues, and vLLM's internal LLM
-scheduler.
+VRAM budget (observed via `nvidia-smi`): **~5 GB of 12 GB** — STT ~0.8 GB, vLLM ~1 GB
+(tunable), TTS ~0.2 GB, plus CUDA context overhead. Plenty of headroom for concurrency tuning.
 
 ## Architecture Overview
 
-### V1: Monolithic Processing Engine
-
-V1 used one FastAPI processing service for the whole voice turn:
+### V3: Fully Streaming Pipeline (current)
 
 ```text
-Browser Client
-  -> Node Orchestrator
-  -> Processing Engine /voice-chat
-     -> STT
-     -> LLM
-     -> TTS
-  -> WAV response
-```
-
-The processing engine loaded all models on startup:
-
-- STT: NVIDIA Canary / SALM
-- LLM: Llama 3.2 via Transformers, loaded in 4-bit
-- TTS: Kokoro
-
-This was a good first version because it proved end-to-end voice interaction.
-The tradeoff was concurrency. Each model stage was protected by locks, so
-concurrent users queued behind a single sequential pipeline.
-
-### V2: Queue-Backed Services + vLLM
-
-V2 separates model execution into stage-specific services:
-
-```text
-Browser Client
+Browser (mic, PCM16 100ms frames)
   |
-  | PCM16 audio over WebSocket
+  |  WebSocket  ws://<orch>:3000/ws/audio
   v
 Node Orchestrator
+  |  - energy gate (RMS): forward voiced frames, signal silence
+  |  - per-session WebSocket to the STT service
+  |  - sentence buffer over the LLM token stream
+  |  - barge-in via AbortController, 10-turn history
   |
-  | complete WAV utterance
-  v
-RabbitMQ stt.jobs
+  +--WS--> STT Service  :7003   faster-whisper medium int8
+  |  <--   partial + final transcripts
   |
-  v
-STT Worker
+  |  on final transcript:
+  +--SSE-> vLLM          :8000   Qwen2.5-0.5B-Instruct (token stream)
+  |  <--   tokens -> sentence buffer
   |
-  | transcript reply
-  v
-orchestrator.replies
-  |
-  v
-Node Orchestrator
-  |
-  | chat completion request
-  v
-vLLM Server
-  |
-  | assistant text
-  v
-Node Orchestrator
-  |
-  | text to synthesize
-  v
-RabbitMQ tts.jobs
+  |  per complete sentence:
+  +--HTTP-> TTS Service  :7002   Kokoro-82M (length-prefixed PCM16 chunks)
+  |  <--   PCM16 audio chunks
   |
   v
-TTS Worker
-  |
-  | WAV reply
-  v
-orchestrator.replies
-  |
-  v
-Node Orchestrator
-  |
-  | WAV/audio over WebSocket
-  v
-Browser Client
+Browser (AudioWorklet ring buffer, gapless streaming playback)
 ```
 
-In V2:
+The stages **overlap**: STT runs continuously while the user speaks; the LLM starts on the first
+final transcript; TTS starts on the first complete sentence; the browser plays the first chunk
+while later sentences are still being synthesized. This overlap is what produces the low TTFA.
 
-- `stt.jobs` is a RabbitMQ request queue for STT work.
-- `tts.jobs` is a RabbitMQ request queue for TTS work.
-- `orchestrator.replies.<instanceId>` is a temporary reply queue consumed by
-  the orchestrator instance that sent the request.
-- The orchestrator uses `correlationId` to match worker replies to the active
-  voice turn.
-- vLLM serves the LLM through an OpenAI-compatible HTTP API.
+### Architecture history
 
-For the current 12 GB VRAM machine, the worker pool size is intentionally one:
+- **V1 — Monolith.** One FastAPI `/voice-chat` endpoint loaded STT (Canary), LLM (Llama 3.2, 4-bit), and TTS (Kokoro). Each stage was lock-protected, so concurrent users queued behind one sequential pipeline. Proved end-to-end voice; poor concurrency.
+- **V2 — Queue-backed + vLLM.** STT and TTS became RabbitMQ workers (`stt.jobs` / `tts.jobs` + reply queues matched by `correlationId`); vLLM took over the LLM. STT/TTS scaled independently; >50% latency reduction under load. Still batch (each stage waited for the previous to fully finish) and still VAD-gated.
+- **V3 — Streaming.** Removed VAD (energy gate instead), removed RabbitMQ from the hot path (direct WS/HTTP), replaced Canary with streaming faster-whisper, enabled token streaming from vLLM, and added a sentence buffer + streaming TTS + AudioWorklet playback. Added barge-in and conversation history.
 
-```text
-stt.jobs -> STT worker 1
-tts.jobs -> TTS worker 1
-vLLM     -> one LLM server
-```
-
-Later, the same queue contract can scale out:
-
-```text
-stt.jobs -> STT worker 1
-         -> STT worker 2
-         -> STT worker 3
-```
+> Horizontal scaling (V2's original goal) returns later as **service replication behind a load
+> balancer / queue** — the streaming services are stateless per request, so this is additive.
 
 ## Repository Layout
 
 ```text
 client/
-  Browser client that captures microphone audio and plays returned WAV audio.
+  Browser client: captures mic audio, streams PCM16, plays streaming PCM16
+  playback through an AudioWorklet ring buffer. Supports barge-in.
 
 orchestrator-service/
-  Node.js + TypeScript WebSocket server.
-  Owns sessions, VAD endpointing, RabbitMQ RPC, vLLM calls, and client replies.
+  Node.js + TypeScript WebSocket server. Owns sessions, the energy gate,
+  the per-session STT WebSocket, the sentence buffer, vLLM streaming,
+  TTS streaming, barge-in, and conversation history.
 
 processing-engine/
-  V1 FastAPI processing engine plus V2 STT/TTS worker code.
-  The monolithic /voice-chat path is kept for comparison and rollback.
+  Python services for the GPU box:
+    stt_service.py        - FastAPI + WebSocket streaming STT (faster-whisper)
+    tts-service.py        - FastAPI streaming TTS (Kokoro)
+    app/models/stt.py     - faster-whisper runtime
+    app/models/tts.py     - Kokoro runtime (streaming PCM16 chunks)
+    app/config.py         - STT/TTS configuration
 
 benchmarks/
-  WebSocket benchmark harness, fixed sample audio, and V1/V2 benchmark CSVs.
+  WebSocket benchmark harness, fixed sample audio, and V1/V2/V3 CSVs.
 ```
 
 ## Runtime Components
 
 ### Node Orchestrator
 
-Responsibilities:
-
-- Accept WebSocket audio from the browser.
-- Re-frame PCM audio into 100 ms VAD frames.
-- Detect speech start and speech end.
-- Publish STT jobs to RabbitMQ.
-- Call vLLM for LLM inference.
-- Publish TTS jobs to RabbitMQ.
-- Send WAV audio replies back to the browser.
+- Accepts WebSocket audio from the browser and re-frames it into 100 ms frames.
+- **Energy gate**: forwards voiced frames (RMS over threshold) to that session's STT WebSocket; after a short silence, sends a `{ "silence": true }` signal.
+- Opens a **dedicated STT WebSocket per session** and triggers a turn on the final transcript.
+- Streams the LLM response from vLLM (SSE), feeds tokens into a **sentence buffer**, and fires each complete sentence to the TTS service.
+- Forwards TTS PCM16 chunks to the browser, framed by `audio_start` / `audio_end` control messages.
+- **Barge-in**: a new final transcript aborts the in-flight turn (`AbortController`) and sends `audio_cancel`.
 
 Important files:
 
 - `orchestrator-service/src/index.ts`
 - `orchestrator-service/src/session/sessionManager.ts`
-- `orchestrator-service/src/vad/speechDetector.ts`
+- `orchestrator-service/src/vad/speechDetector.ts` (energy gate)
 - `orchestrator-service/src/pipeline/voicePipeline.ts`
-- `orchestrator-service/src/messaging/rabbitRpcClient.ts`
+- `orchestrator-service/src/pipeline/sentenceBuffer.ts`
 - `orchestrator-service/src/pipeline/vllmClient.ts`
 
-### RabbitMQ
+### STT Service (`:7003`)
 
-RabbitMQ provides bounded job queues and backpressure between the orchestrator
-and model workers.
+Standalone FastAPI + WebSocket server. Each orchestrator session opens `ws://<gpu>:7003/ws/stt`,
+streams PCM16 frames, and receives partial/final transcripts as JSON. Final detection: transcript
+stable for ~300 ms **and** a silence signal from the orchestrator.
 
-Queues:
+- Model: `faster-whisper medium`, int8, on CUDA.
+- `STT_NUM_WORKERS` (default 4) allows concurrent transcriptions on separate CUDA streams.
+- Partials transcribe only a trailing window (avoids O(n²) re-decoding of the growing buffer).
 
-```text
-stt.jobs
-tts.jobs
-orchestrator.replies.<instanceId>
-```
+File: `processing-engine/stt_service.py`
 
-`stt.jobs` and `tts.jobs` are durable shared queues. Reply queues are exclusive,
-auto-delete queues owned by a single orchestrator instance.
+### vLLM Server (`:8000`)
 
-### STT Worker
+Serves the LLM with continuous batching over an OpenAI-compatible HTTP API. The orchestrator calls
+`/v1/chat/completions` with `stream: true`.
 
-The STT worker loads the STT model once, consumes `stt.jobs`, transcribes WAV
-audio, and publishes JSON transcript replies.
+Default model: `Qwen/Qwen2.5-0.5B-Instruct`.
 
-File:
+### TTS Service (`:7002`)
 
-```text
-processing-engine/app/workers/stt-worker.py
-```
+Standalone FastAPI server. `POST /tts/stream` accepts `{ "text": "..." }` and returns a stream of
+length-prefixed PCM16 chunks (`4-byte LE length` + PCM bytes).
 
-Current model default:
+Default model: `Kokoro-82M`, 24 kHz output.
 
-```text
-nvidia/canary-qwen-2.5b
-```
-
-### vLLM Server
-
-vLLM replaces the old in-process Transformers LLM path. It owns LLM scheduling,
-KV cache management, and request batching.
-
-Current practical model for the 12 GB VRAM machine:
-
-```text
-Qwen/Qwen2.5-0.5B-Instruct
-```
-
-The previous Llama 3.2 1B model can work, but it is gated and heavier when
-served by vLLM in bf16. The old V1 LLM path used 4-bit quantization, so the
-raw vLLM memory profile is not identical.
-
-### TTS Worker
-
-The TTS worker loads Kokoro once, consumes `tts.jobs`, synthesizes audio, and
-publishes WAV bytes back to the orchestrator reply queue.
-
-File:
-
-```text
-processing-engine/app/workers/tts-worker.py
-```
-
-Current TTS default:
-
-```text
-Kokoro-82M
-```
+File: `processing-engine/tts-service.py`
 
 ## Setup
 
-### 1. Start RabbitMQ On The GPU PC
+Run the three GPU services on the GPU PC, the orchestrator anywhere on the LAN, and open the client
+in a browser.
 
-```bash
-docker run -d \
-  --name voiceai-rabbitmq \
-  --hostname voiceai-rabbitmq \
-  -e RABBITMQ_DEFAULT_USER=voiceai \
-  -e RABBITMQ_DEFAULT_PASS=voiceai_password \
-  -p 5672:5672 \
-  -p 15672:15672 \
-  rabbitmq:4-management
-```
-
-Dashboard:
-
-```text
-http://<GPU_PC_IP>:15672
-```
-
-AMQP URL:
-
-```text
-amqp://voiceai:voiceai_password@<GPU_PC_IP>:5672
-```
-
-### 2. Start vLLM On The GPU PC
-
-For the current machine, start with a small model and conservative GPU memory:
+### 1. Start vLLM on the GPU PC
 
 ```bash
 docker rm -f voiceai-vllm
 
 docker run -d \
   --name voiceai-vllm \
-  --runtime nvidia \
-  --gpus all \
+  --runtime nvidia --gpus all \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
-  -p 8000:8000 \
-  --ipc=host \
+  -p 8000:8000 --ipc=host \
   vllm/vllm-openai:latest \
   Qwen/Qwen2.5-0.5B-Instruct \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --gpu-memory-utilization 0.20 \
+  --host 0.0.0.0 --port 8000 \
+  --gpu-memory-utilization 0.45 \
   --max-model-len 2048 \
-  --max-num-seqs 1 \
-  --max-num-batched-tokens 512
+  --max-num-seqs 64
 ```
 
-Check readiness:
+Check: `curl http://127.0.0.1:8000/v1/models`
+
+### 2. Start the STT service on the GPU PC
 
 ```bash
-curl http://127.0.0.1:8000/v1/models
+cd processing-engine
+pip install -r requirements.txt
+
+PYTHONPATH=. python3 stt_service.py
+# listens on 0.0.0.0:7003, WebSocket at /ws/stt
 ```
 
-Test generation:
+First run downloads the faster-whisper `medium` weights (~1.5 GB) and caches them under
+`~/.cache/huggingface`. Tune concurrency with `STT_NUM_WORKERS`.
 
-```bash
-curl http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen2.5-0.5B-Instruct",
-    "messages": [
-      { "role": "user", "content": "Say hello in one short sentence." }
-    ],
-    "max_tokens": 32
-  }'
-```
-
-### 3. Start STT Worker On The GPU PC
+### 3. Start the TTS service on the GPU PC
 
 ```bash
 cd processing-engine
 
-RABBITMQ_URL="amqp://voiceai:voiceai_password@127.0.0.1:5672" \
-HF_HOME="$PWD/models/huggingface" \
-TRANSFORMERS_CACHE="$PWD/models/huggingface" \
-NEMO_CACHE_DIR="$PWD/models/nemo" \
-PYTHONPATH=. \
-python3 app/workers/stt-worker.py
+PYTHONPATH=. python3 tts-service.py
+# listens on 0.0.0.0:7002, endpoint POST /tts/stream
 ```
 
-If the machine has only 16 GB RAM and the process is killed during model load,
-stop vLLM, load STT alone, and consider adding swap or using a smaller STT
-model. A plain `Killed` message without a Python traceback usually means the
-Linux OOM killer terminated the process.
-
-### 4. Start TTS Worker On The GPU PC
-
-```bash
-cd processing-engine
-
-RABBITMQ_URL="amqp://voiceai:voiceai_password@127.0.0.1:5672" \
-PYTHONPATH=. \
-python3 app/workers/tts-worker.py
-```
-
-### 5. Start The Orchestrator
+### 4. Start the orchestrator
 
 ```bash
 cd orchestrator-service
@@ -369,189 +225,98 @@ npm install
 npm run dev
 ```
 
-Example `.env`:
+Example `.env` (all service URLs default to `REMOTE_IP`):
 
 ```env
+REMOTE_IP=192.168.1.6
 PORT=3000
-RABBITMQ_URL=amqp://voiceai:voiceai_password@<GPU_PC_IP>:5672
-VLLM_BASE_URL=http://<GPU_PC_IP>:8000
+RMS_SPEECH_THRESHOLD=600
+# STT_WS_URL=ws://192.168.1.6:7003
+# TTS_STREAM_URL=http://192.168.1.6:7002
+# VLLM_BASE_URL=http://192.168.1.6:8000
 VLLM_MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct
-STAGE_TIMEOUT_MS=30000
+LLM_MAX_NEW_TOKENS=256
+LLM_TEMPERATURE=0.6
 ```
 
-If the orchestrator runs on the GPU PC, `127.0.0.1` can be used for RabbitMQ
-and vLLM. If it runs on another machine, use the GPU PC LAN IP.
-
-### 6. Open The Client
-
-Open:
+Wait for:
 
 ```text
-client/index.html
+HTTP server listening on http://localhost:3000
+WebSocket endpoint ready at ws://localhost:3000/ws/audio
 ```
 
-The browser sends PCM16, 16 kHz, mono audio over WebSocket to:
+### 5. Open the client
 
-```text
-ws://<ORCHESTRATOR_HOST>:3000/ws/audio
+Set the WebSocket target in `client/config.js`, then serve the folder:
+
+```bash
+cd client
+python3 -m http.server 8080 --bind 0.0.0.0
 ```
+
+Open `http://localhost:3000/health` to confirm the orchestrator is up, then open the client at
+`http://localhost:8080`. The browser streams PCM16, 16 kHz, mono audio over WebSocket.
+
+#### Using the client from a phone on the same network
+
+1. In `client/config.js`, set `WS_URL` to `ws://<MAC_LAN_IP>:3000/ws/audio`.
+2. Serve the client bound to `0.0.0.0` (as above) and browse to `http://<MAC_LAN_IP>:8080`.
+3. **Microphone needs a secure context.** Over plain `http://<ip>` the browser blocks `getUserMedia`. On Android Chrome, add the origin to `chrome://flags/#unsafely-treat-insecure-origin-as-secure` (e.g. `http://192.168.1.4:8080`), set it to **Enabled**, and relaunch. For iOS or a cleaner setup, put both the client and orchestrator behind HTTPS/WSS (e.g. an `ngrok` tunnel) and use a `wss://` URL.
 
 ## Benchmarking
 
-The benchmark harness simulates browser clients over WebSocket. It sends the
-same fixed WAV sample and waits for the first binary WAV reply.
+The harness simulates browser clients over WebSocket, sends a fixed WAV sample, and now measures
+**TTFA** (first audio byte) in addition to full-reply latency. See `benchmarks/`.
 
 ```bash
 cd benchmarks
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
 python bench.py \
   --url ws://localhost:3000/ws/audio \
   --wav sample.wav \
   --levels 1,5,10 \
+  --realtime \
   --timeout 180 \
-  --csv v2_bench.csv \
-  --label split-rabbit-vllm
+  --csv results.csv \
+  --label v3
 ```
 
-Existing benchmark files:
+Use `--realtime` for V3: it paces frames at 100 ms each (like a real mic), which the streaming STT
+needs to detect utterance boundaries. CSVs: `v1_bench.csv`, `v2_bench.csv`, `results.csv`.
 
-```text
-benchmarks/v1_bench.csv
-benchmarks/v2_bench.csv
-```
-
-### Benchmark Results
-
-Latency is measured from end-of-upload to first audio reply.
-
-| Concurrent users | V1 median latency | V2 median latency | Improvement |
-| ---: | ---: | ---: | ---: |
-| 1 | 2192 ms | 1447 ms | 34.0% faster |
-| 5 | 7006 ms | 3271 ms | 53.3% faster |
-| 10 | 11627 ms | 5318 ms | 54.3% faster |
-
-Detailed V2 run:
-
-| Concurrent users | Success | Median | Mean | p95 | Max | Throughput |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 1/1 | 1447 ms | 1447 ms | 1447 ms | 1447 ms | 0.69 replies/sec |
-| 5 | 5/5 | 3271 ms | 3310 ms | 4358 ms | 4574 ms | 1.09 replies/sec |
-| 10 | 10/10 | 5318 ms | 5474 ms | 8129 ms | 8342 ms | 1.19 replies/sec |
-
-The improvement is strongest under concurrency because V2 removes the single
-monolithic voice-turn bottleneck and lets STT/TTS queue independently while
-vLLM handles LLM serving.
-
-## V1 To V2 Transition Status
-
-Completed:
-
-- RabbitMQ request/reply path added for STT and TTS.
-- STT worker consumes `stt.jobs`.
-- TTS worker consumes `tts.jobs`.
-- Orchestrator now owns the voice turn workflow.
-- vLLM is used for LLM inference through `/v1/chat/completions`.
-- Browser client receives the final WAV reply through the existing WebSocket.
-- V2 benchmark completed successfully at 1, 5, and 10 concurrent users.
-
-Still kept for rollback:
-
-- V1 FastAPI processing engine files.
-- Old `/voice-chat` route and monolithic STT -> LLM -> TTS pipeline.
-
-Next steps:
-
-- Add per-stage timing logs for V2: STT queue wait, STT compute, LLM latency,
-  TTS queue wait, TTS compute, total turn time.
-- Add stale-turn cancellation so older turns are dropped when the user speaks
-  again.
-- Add queue max length and tighter TTLs for live audio jobs.
-- Rename worker files from `stt-worker.py` / `tts-worker.py` to Python module
-  friendly names if we want to run them with `python -m`.
-- Evaluate smaller STT models for the 12 GB VRAM machine.
-- Add health endpoints or heartbeat logs for workers.
-- Add service scripts or Compose files once the single-machine flow is stable.
-
-## Operational Notes
-
-- `stt.jobs` and `tts.jobs` should be durable queues on RabbitMQ 4.
-- Reply queues should be exclusive and auto-delete.
-- TTS replies must be valid WAV bytes. The orchestrator checks the `RIFF/WAVE`
-  header before sending audio to the browser.
-- Avoid sending JSON error payloads to the browser as audio.
-- Keep `STT_PREFETCH=1` and `TTS_PREFETCH=1` on the current GPU PC.
-- Start with small vLLM limits on 12 GB VRAM and increase only after checking
-  `nvidia-smi`.
-- The LLM can answer stale factual questions if it has no fresh context. Add
-  current-date prompting or retrieval/tooling before treating factual answers
-  as authoritative.
+> Note: because V3 can begin responding *before* the upload finishes, the benchmark's
+> "end-of-upload" timing reference understates TTFA in some rows. The honest single-turn TTFA is
+> ~165 ms. Endpointing tuning (avoiding early finalization on mid-sentence pauses) is in progress.
 
 ## Troubleshooting
 
-### RabbitMQ rejects transient queues
+### `/health` works but the mic doesn't
 
-RabbitMQ 4 rejects shared non-durable, non-exclusive queues by default. Use
-durable queues for `stt.jobs` and `tts.jobs`.
+`getUserMedia` requires a secure context. On `localhost` it works; over a LAN IP it does not. Use
+the Android Chrome insecure-origin flag or an HTTPS/WSS tunnel (see the phone section above).
 
-```text
-stt.jobs: durable=true
-tts.jobs: durable=true
-reply queues: exclusive=true, autoDelete=true
-```
+### Connection opens but there's no audio reply
 
-### STT gets queued and nothing happens
+The orchestrator's per-session STT WebSocket connects to the GPU box on demand. Make sure the STT
+service (`:7003`), TTS service (`:7002`), and vLLM (`:8000`) are all running and reachable at
+`REMOTE_IP`. Check the orchestrator log for `STT WebSocket connected`.
 
-Check consumers:
+### Audio cuts off or won't play in the browser
 
-```bash
-docker exec -it voiceai-rabbitmq rabbitmqctl list_queues \
-  name messages_ready messages_unacknowledged consumers durable
-```
+The client buffers streaming PCM16 in an AudioWorklet ring buffer and drains on `audio_end`. If
+`audio_end` arrives before the worklet finishes initializing, the drain is deferred until init
+completes. Hard-refresh (Cmd/Ctrl+Shift+R) to clear a cached `app.js`.
 
-If `stt.jobs` has `consumers=0`, the STT worker is not connected.
+### Transcripts get cut off mid-sentence
 
-### STT worker cannot import app modules
+The energy gate finalizes on a short silence. If it cuts people off during natural pauses, raise
+the silence-to-finalize threshold in `orchestrator-service/src/vad/speechDetector.ts` (and/or the
+stability window in `stt_service.py`).
 
-Run with `PYTHONPATH=.` from `processing-engine`:
+### Process prints `Killed` while loading a model
 
-```bash
-PYTHONPATH=. python3 app/workers/stt-worker.py
-```
-
-### Hugging Face cache permission errors
-
-Use project-local caches:
-
-```bash
-HF_HOME="$PWD/models/huggingface" \
-TRANSFORMERS_CACHE="$PWD/models/huggingface" \
-NEMO_CACHE_DIR="$PWD/models/nemo"
-```
-
-### Process prints `Killed`
-
-This is usually the Linux OOM killer. Stop vLLM, load STT alone, check memory,
-and consider adding swap:
-
-```bash
-free -h
-nvidia-smi
-dmesg -T | grep -i -E "killed process|out of memory|oom" | tail -20
-```
-
-### Browser cannot play AI audio
-
-The browser likely received non-WAV bytes. Check the orchestrator log for:
-
-```text
-TTS returned non-WAV
-```
-
-Then inspect the TTS worker error. A valid WAV reply starts with:
-
-```text
-RIFF....WAVE
-```
+Usually the Linux OOM killer on a 16 GB box. Load services one at a time, check `free -h` /
+`nvidia-smi`, and add swap if needed.
