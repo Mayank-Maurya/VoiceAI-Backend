@@ -20,8 +20,13 @@ from app.models.stt import SttRuntime
 STT_PORT = int(os.getenv("STT_PORT", "7003"))
 SAMPLE_RATE = 16000
 
-TRANSCRIBE_INTERVAL = 0.5
-STABLE_DURATION = 0.3
+TRANSCRIBE_INTERVAL = 0.7   # seconds between partial transcriptions
+STABLE_DURATION = 0.3       # transcript must hold steady this long to finalize
+PARTIAL_WINDOW_SEC = 6.0    # partials transcribe only the trailing N seconds
+MIN_AUDIO_SEC = 0.3         # ignore buffers shorter than this
+
+PARTIAL_WINDOW_SAMPLES = int(SAMPLE_RATE * PARTIAL_WINDOW_SEC)
+MIN_AUDIO_SAMPLES = int(SAMPLE_RATE * MIN_AUDIO_SEC)
 
 runtime = SttRuntime()
 
@@ -54,14 +59,17 @@ async def stt_websocket(ws: WebSocket):
     async def do_transcribe():
         nonlocal last_transcript, last_change_at, audio_buffer
 
-        if len(audio_buffer) < SAMPLE_RATE * 0.3:
+        if len(audio_buffer) < MIN_AUDIO_SAMPLES:
             return
 
-        audio_snap = audio_buffer.copy()
+        # Only transcribe the trailing window for live partials. Keeps per-tick
+        # cost constant instead of growing with utterance length — the old code
+        # re-transcribed the whole buffer every tick, which was O(n²).
+        window = audio_buffer[-PARTIAL_WINDOW_SAMPLES:].copy()
 
-        text = await run_in_threadpool(runtime.transcribe_buffer, audio_snap)
+        text = await run_in_threadpool(runtime.transcribe_buffer, window)
 
-        if text != last_transcript:
+        if text and text != last_transcript:
             last_transcript = text
             last_change_at = time.monotonic()
             await ws.send_json({"text": text, "is_final": False})
@@ -72,11 +80,11 @@ async def stt_websocket(ws: WebSocket):
         if not last_transcript:
             return
 
-        now = time.monotonic()
-        stable_for = now - last_change_at
-
-        if stable_for >= STABLE_DURATION and silence_signaled:
-            if len(audio_buffer) >= SAMPLE_RATE * 0.3:
+        if (time.monotonic() - last_change_at) >= STABLE_DURATION and silence_signaled:
+            # One full-buffer pass only when the utterance ran past the partial
+            # window; otherwise the last windowed partial already covered the
+            # whole utterance, so reuse it with no redundant decode.
+            if len(audio_buffer) > PARTIAL_WINDOW_SAMPLES:
                 text = await run_in_threadpool(
                     runtime.transcribe_buffer, audio_buffer.copy()
                 )
@@ -94,7 +102,7 @@ async def stt_websocket(ws: WebSocket):
     async def transcription_loop():
         while True:
             await asyncio.sleep(TRANSCRIBE_INTERVAL)
-            if has_audio and len(audio_buffer) >= SAMPLE_RATE * 0.3:
+            if has_audio and len(audio_buffer) >= MIN_AUDIO_SAMPLES:
                 await do_transcribe()
                 await check_final()
 

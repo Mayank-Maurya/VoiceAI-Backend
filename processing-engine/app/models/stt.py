@@ -1,5 +1,7 @@
 """Speech-to-text runtime using faster-whisper (CTranslate2)."""
 
+import os
+
 import numpy as np
 from faster_whisper import WhisperModel
 
@@ -14,11 +16,21 @@ class SttRuntime:
         if self.model is not None:
             return
 
-        print(f"Loading STT model: faster-whisper {STT_MODEL_NAME} (int8) on cuda...", flush=True)
+        # num_workers > 1 lets multiple transcribe() calls run concurrently,
+        # each on its own CUDA stream. Workers share the weights (cheap on
+        # VRAM) — only per-request activation buffers are duplicated.
+        num_workers = int(os.getenv("STT_NUM_WORKERS", "4"))
+
+        print(
+            f"Loading STT model: faster-whisper {STT_MODEL_NAME} (int8) on cuda, "
+            f"num_workers={num_workers}...",
+            flush=True,
+        )
         self.model = WhisperModel(
             STT_MODEL_NAME,
             device="cuda",
             compute_type="int8",
+            num_workers=num_workers,
         )
         print("STT loaded into VRAM.", flush=True)
 
