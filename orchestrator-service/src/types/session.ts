@@ -2,6 +2,11 @@ import type { WebSocket as BrowserSocket } from "ws";
 import type WebSocket from "ws";
 import { RingBuffer } from "../audio/ringBuffer";
 
+export type ChatMessage = {
+    role: "system" | "user" | "assistant";
+    content: string;
+};
+
 export type ClientSession = {
     id: string;
     socket: BrowserSocket;
@@ -15,4 +20,7 @@ export type ClientSession = {
     sttSocket: WebSocket | null;
     silenceFrames: number;
     silenceSent: boolean;
+
+    history: ChatMessage[];
+    turnAbort: AbortController | null;
 };

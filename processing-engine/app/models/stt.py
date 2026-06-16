@@ -5,9 +5,6 @@ from faster_whisper import WhisperModel
 
 from app.config import STT_MODEL_NAME
 
-# Default to "medium" if config still has the old Canary model name.
-WHISPER_MODEL = STT_MODEL_NAME if "whisper" in STT_MODEL_NAME or "/" not in STT_MODEL_NAME else "medium"
-
 
 class SttRuntime:
     def __init__(self) -> None:
@@ -17,9 +14,9 @@ class SttRuntime:
         if self.model is not None:
             return
 
-        print(f"Loading STT model: faster-whisper {WHISPER_MODEL} (int8)...", flush=True)
+        print(f"Loading STT model: faster-whisper {STT_MODEL_NAME} (int8)...", flush=True)
         self.model = WhisperModel(
-            WHISPER_MODEL,
+            STT_MODEL_NAME,
             device="cuda",
             compute_type="int8",
         )

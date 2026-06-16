@@ -2,7 +2,6 @@ import http from "node:http";
 import { WebSocketServer } from "ws";
 import { PORT, WS_PATH } from "./config";
 import { addConnection, handleAudio, removeConnection } from "./session/sessionManager";
-import { rabbitRpcClient } from "./messaging/rabbitRpcClient";
 
 const server = http.createServer((req, res) => {
     if (req.url === "/health") {
@@ -15,7 +14,6 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ error: "Not found" }));
 });
 
-// Handle WebSocket upgrades ourselves so we can reject unknown paths.
 const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
@@ -48,16 +46,7 @@ wss.on("connection", (socket) => {
     });
 });
 
-async function main(): Promise<void> {
-    await rabbitRpcClient.connect();
-
-    server.listen(PORT, () => {
-        console.log(`HTTP server listening on http://localhost:${PORT}`);
-        console.log(`WebSocket endpoint ready at ws://localhost:${PORT}${WS_PATH}`);
-    });
-}
-
-main().catch((error) => {
-    console.error("Failed to start orchestrator", error);
-    process.exit(1);
+server.listen(PORT, () => {
+    console.log(`HTTP server listening on http://localhost:${PORT}`);
+    console.log(`WebSocket endpoint ready at ws://localhost:${PORT}${WS_PATH}`);
 });

@@ -2,9 +2,5 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 soundfile==0.12.1
 numpy>=1.26,<2.0
-transformers
-accelerate
-bitsandbytes
 kokoro
-pika
 faster-whisper

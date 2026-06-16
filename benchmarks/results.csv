@@ -1,0 +1,2 @@
+timestamp,label,level,request,ok,ttfa_ms,latency_ms,total_ms,reply_bytes,error
+2026-06-16T04:07:07+00:00,phase3-streaming,1,0,True,164.9,357.4,5541.0,728400,

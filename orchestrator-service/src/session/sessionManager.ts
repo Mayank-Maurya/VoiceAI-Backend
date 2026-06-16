@@ -5,7 +5,7 @@ import type { ClientSession } from "../types/session";
 import { VAD_FRAME_BYTES, STT_WS_URL } from "../config";
 import { RingBuffer } from "../audio/ringBuffer";
 import { processAudioFrame } from "../vad/speechDetector";
-import { streamTurnToClient } from "../pipeline/voicePipeline";
+import { cancelCurrentTurn, streamTurnToClient } from "../pipeline/voicePipeline";
 
 const sessions = new Map<string, ClientSession>();
 
@@ -20,6 +20,8 @@ export function addConnection(socket: BrowserSocket): ClientSession {
         sttSocket: null,
         silenceFrames: 0,
         silenceSent: false,
+        history: [],
+        turnAbort: null,
     };
 
     sessions.set(session.id, session);
@@ -44,6 +46,12 @@ function connectStt(session: ClientSession): void {
 
             if (msg.is_final && msg.text) {
                 console.log(`[${session.id}] USER: ${msg.text}`);
+
+                if (session.turnAbort) {
+                    console.log(`[${session.id}] Barge-in detected, cancelling current turn`);
+                    cancelCurrentTurn(session);
+                }
+
                 streamTurnToClient(session, msg.text).catch((err) => {
                     console.error(`[${session.id}] Pipeline error:`, err);
                 });
@@ -68,6 +76,11 @@ function connectStt(session: ClientSession): void {
 export function removeConnection(session: ClientSession): void {
     sessions.delete(session.id);
     session.vadBuffer.clear();
+
+    if (session.turnAbort) {
+        session.turnAbort.abort();
+        session.turnAbort = null;
+    }
 
     if (session.sttSocket) {
         session.sttSocket.close();

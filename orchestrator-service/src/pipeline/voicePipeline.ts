@@ -1,22 +1,50 @@
 import crypto from "node:crypto";
-import type { ClientSession } from "../types/session";
-import { TTS_STREAM_URL } from "../config";
+import type { ClientSession, ChatMessage } from "../types/session";
+import { LLM_SYSTEM_PROMPT, TTS_STREAM_URL } from "../config";
 import { streamLlmResponse } from "./vllmClient";
 import { sentenceBuffer } from "./sentenceBuffer";
+
+const MAX_HISTORY_TURNS = 10;
+
+export function cancelCurrentTurn(session: ClientSession): void {
+    if (session.turnAbort) {
+        session.turnAbort.abort();
+        session.turnAbort = null;
+    }
+
+    if (session.socket.readyState === session.socket.OPEN) {
+        session.socket.send(JSON.stringify({ type: "audio_cancel" }));
+    }
+}
 
 export async function streamTurnToClient(
     session: ClientSession,
     userText: string,
 ): Promise<void> {
+    if (session.turnAbort) {
+        cancelCurrentTurn(session);
+    }
+
+    const abort = new AbortController();
+    session.turnAbort = abort;
+
     const turnId = crypto.randomUUID();
     const startedAt = Date.now();
     let firstSentenceAt: number | null = null;
     let firstAudioAt: number | null = null;
     let sentenceCount = 0;
     let audioStartSent = false;
+    let fullResponse = "";
+
+    session.history.push({ role: "user", content: userText });
+
+    const messages: ChatMessage[] = [
+        { role: "system", content: LLM_SYSTEM_PROMPT },
+        ...session.history.slice(-MAX_HISTORY_TURNS * 2),
+    ];
 
     const sendAudioStart = () => {
-        if (audioStartSent) return;
+        if (audioStartSent || abort.signal.aborted) return;
         audioStartSent = true;
         if (session.socket.readyState === session.socket.OPEN) {
             session.socket.send(JSON.stringify({
@@ -29,23 +57,43 @@ export async function streamTurnToClient(
 
     console.log(`[${session.id}] turn=${turnId} streaming LLM+TTS for: "${userText}"`);
 
-    for await (const sentence of sentenceBuffer(streamLlmResponse(userText))) {
-        sentenceCount++;
-        if (firstSentenceAt === null) {
-            firstSentenceAt = Date.now();
-        }
-        console.log(`[${session.id}] turn=${turnId} TTS sentence ${sentenceCount}: "${sentence}"`);
+    try {
+        for await (const sentence of sentenceBuffer(streamLlmResponse(messages, abort.signal))) {
+            if (abort.signal.aborted) break;
 
-        await streamTtsToClient(session, sentence, () => {
-            sendAudioStart();
-            if (firstAudioAt === null) {
-                firstAudioAt = Date.now();
+            sentenceCount++;
+            fullResponse += (fullResponse ? " " : "") + sentence;
+
+            if (firstSentenceAt === null) {
+                firstSentenceAt = Date.now();
             }
-        });
+            console.log(`[${session.id}] turn=${turnId} TTS sentence ${sentenceCount}: "${sentence}"`);
+
+            await streamTtsToClient(session, sentence, abort.signal, () => {
+                sendAudioStart();
+                if (firstAudioAt === null) {
+                    firstAudioAt = Date.now();
+                }
+            });
+        }
+    } catch (err: unknown) {
+        if (err instanceof Error && err.name === "AbortError") {
+            console.log(`[${session.id}] turn=${turnId} interrupted (barge-in)`);
+        } else {
+            throw err;
+        }
     }
 
-    if (audioStartSent && session.socket.readyState === session.socket.OPEN) {
+    if (fullResponse) {
+        session.history.push({ role: "assistant", content: fullResponse });
+    }
+
+    if (audioStartSent && !abort.signal.aborted && session.socket.readyState === session.socket.OPEN) {
         session.socket.send(JSON.stringify({ type: "audio_end", turnId }));
+    }
+
+    if (session.turnAbort === abort) {
+        session.turnAbort = null;
     }
 
     const totalMs = Date.now() - startedAt;
@@ -62,12 +110,14 @@ export async function streamTurnToClient(
 async function streamTtsToClient(
     session: ClientSession,
     text: string,
+    signal: AbortSignal,
     onFirstChunk: () => void,
 ): Promise<void> {
     const response = await fetch(`${TTS_STREAM_URL}/tts/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
+        signal,
     });
 
     if (!response.ok) {
@@ -85,6 +135,8 @@ async function streamTtsToClient(
 
     try {
         while (true) {
+            if (signal.aborted) break;
+
             const { done, value } = await reader.read();
             if (done) break;
 
