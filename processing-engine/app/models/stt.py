@@ -14,7 +14,7 @@ class SttRuntime:
         if self.model is not None:
             return
 
-        print(f"Loading STT model: faster-whisper {STT_MODEL_NAME} (int8)...", flush=True)
+        print(f"Loading STT model: faster-whisper {STT_MODEL_NAME} (int8) on cuda...", flush=True)
         self.model = WhisperModel(
             STT_MODEL_NAME,
             device="cuda",

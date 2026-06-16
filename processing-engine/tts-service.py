@@ -7,7 +7,6 @@ Or:
     PYTHONPATH=. uvicorn tts_service:app --host 0.0.0.0 --port 7002
 """
 
-import asyncio
 import os
 from contextlib import asynccontextmanager
 
@@ -21,7 +20,6 @@ from app.models.tts import TtsRuntime
 TTS_PORT = int(os.getenv("TTS_PORT", "7002"))
 
 runtime = TtsRuntime()
-gpu_lock = asyncio.Lock()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -47,10 +45,9 @@ async def tts_stream(req: TtsRequest):
     # Generate all chunks under the GPU lock in one threadpool call,
     # then stream them out. This keeps GPU work contained in one thread
     # and avoids the connection dropping mid-stream.
-    async with gpu_lock:
-        chunks = await run_in_threadpool(
-            lambda: list(runtime.generate_audio_chunks(text))
-        )
+    chunks = await run_in_threadpool(
+        lambda: list(runtime.generate_audio_chunks(text))
+    )
 
     async def generate():
         for chunk in chunks:
