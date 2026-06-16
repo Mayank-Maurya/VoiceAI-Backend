@@ -24,7 +24,6 @@ TRANSCRIBE_INTERVAL = 0.5
 STABLE_DURATION = 0.3
 
 runtime = SttRuntime()
-gpu_lock = asyncio.Lock()
 
 
 @asynccontextmanager
@@ -60,8 +59,7 @@ async def stt_websocket(ws: WebSocket):
 
         audio_snap = audio_buffer.copy()
 
-        async with gpu_lock:
-            text = await run_in_threadpool(runtime.transcribe_buffer, audio_snap)
+        text = await run_in_threadpool(runtime.transcribe_buffer, audio_snap)
 
         if text != last_transcript:
             last_transcript = text
@@ -79,10 +77,9 @@ async def stt_websocket(ws: WebSocket):
 
         if stable_for >= STABLE_DURATION and silence_signaled:
             if len(audio_buffer) >= SAMPLE_RATE * 0.3:
-                async with gpu_lock:
-                    text = await run_in_threadpool(
-                        runtime.transcribe_buffer, audio_buffer.copy()
-                    )
+                text = await run_in_threadpool(
+                    runtime.transcribe_buffer, audio_buffer.copy()
+                )
                 if text:
                     last_transcript = text
 
