@@ -46,6 +46,7 @@
   var streamingPlayer = null;
   var streamingReady = false;
   var streamingPendingChunks = [];
+  var streamingDrainPending = false;
 
   endpointValue.textContent = websocketUrl;
   formatValue.textContent = "PCM16 mono, " + targetSampleRate + " Hz";
@@ -113,7 +114,7 @@
   };
 
   StreamingAudioPlayer.prototype.pushPcm16 = function (arrayBuffer) {
-    if (!this.workletNode) return;
+    if (!this.workletNode) { console.log("[stream] pushPcm16: no workletNode!"); return; }
 
     // Convert PCM16 (Int16) to Float32 for the AudioWorklet.
     var int16 = new Int16Array(arrayBuffer);
@@ -144,7 +145,8 @@
   };
 
   StreamingAudioPlayer.prototype.drain = function () {
-    if (!this.workletNode) return;
+    if (!this.workletNode) { console.log("[stream] drain: no workletNode!"); return; }
+    console.log("[stream] drain called, preBuffering:", this.preBuffering, "pending:", this.pendingSamples.length, "preBuffered:", this.preBuffered);
 
     // If still pre-buffering, flush whatever we have and start playback.
     if (this.preBuffering && this.pendingSamples.length > 0) {
@@ -232,25 +234,38 @@
 
       streamingReady = false;
       streamingPendingChunks = [];
+      streamingDrainPending = false;
 
       if (!streamingPlayer) {
         streamingPlayer = new StreamingAudioPlayer();
       }
+      console.log("[stream] audio_start, init pending, queued chunks:", streamingPendingChunks.length);
       streamingPlayer.init(msg.sampleRate || PLAYBACK_SAMPLE_RATE).then(function () {
         streamingReady = true;
-        // Flush any chunks that arrived while the worklet was loading.
+        console.log("[stream] init done, flushing", streamingPendingChunks.length, "queued chunks, drainPending:", streamingDrainPending);
         if (streamingPlayer) {
           for (var i = 0; i < streamingPendingChunks.length; i++) {
             streamingPlayer.pushPcm16(streamingPendingChunks[i]);
           }
         }
         streamingPendingChunks = [];
+        if (streamingDrainPending) {
+          streamingDrainPending = false;
+          console.log("[stream] executing deferred drain");
+          if (streamingPlayer) {
+            streamingPlayer.drain();
+          }
+        }
       });
       return;
     }
 
     if (msg.type === "audio_end") {
-      if (streamingPlayer) {
+      console.log("[stream] audio_end, streamingReady:", streamingReady, "player:", !!streamingPlayer);
+      if (!streamingReady) {
+        streamingDrainPending = true;
+        console.log("[stream] deferring drain, pending chunks:", streamingPendingChunks.length);
+      } else if (streamingPlayer) {
         streamingPlayer.drain();
       }
       return;
@@ -262,6 +277,7 @@
       }
       streamingReady = false;
       streamingPendingChunks = [];
+      streamingDrainPending = false;
       restoreRecordingStatus();
       return;
     }
@@ -372,13 +388,13 @@
   async function stopStreaming(label) {
     stopRequested = true;
 
-    // Stop streaming playback.
     if (streamingPlayer) {
       await streamingPlayer.close();
       streamingPlayer = null;
     }
     streamingReady = false;
     streamingPendingChunks = [];
+    streamingDrainPending = false;
 
     // Stop legacy playback.
     stopPlayback();
@@ -543,10 +559,6 @@
 
   function sendPcmFrame(buffer) {
     if (stopRequested) return;
-
-    // Drop mic frames while the AI is speaking.
-    var isSpeaking = isPlaying || (streamingPlayer && streamingPlayer.isPlaying);
-    if (isSpeaking) return;
 
     updateVoiceActivity(buffer);
 
