@@ -1,27 +1,57 @@
-# Voice AI High-Throughput Backend: System Architecture & Agent Configuration
+# Voice AI Backend: System Architecture & Agent Configuration
 
 ## 1. What We Are Building
-We are building a highly concurrent Voice AI system heavily indexed on backend I/O performance, paired with a thin, lightweight frontend client. The frontend acts solely as a pass-through layer, capturing raw audio input and streaming it over a persistent connection. The backend is an ultra-high-throughput inference orchestration engine designed to ingest continuous voice data, route it through an event-driven architecture, and stream generative responses back with ultra-low latency.
+A highly concurrent, low-latency Voice AI system: a thin browser client streams raw mic audio over a persistent WebSocket to a Node.js orchestrator, which runs a **fully streaming** speech-to-speech pipeline (streaming STT → streaming LLM → streaming TTS) and streams synthesized audio back. The frontend is a pass-through (capture + playback); all coordination lives in the orchestrator and the GPU inference services.
 
-## 2. Why We Are Building It
-To achieve enterprise-grade conversational AI at an extreme scale. The system is explicitly architected to handle a sustained throughput of 470 billion tokens per day, translating to peak inference loads of approximately 5.4 million tokens per second. Hitting this target requires moving beyond standard synchronous REST paradigms in favor of highly optimized event loops, distributed message brokering, and highly parallelized data pipelines.
+## 2. Why We Are Building It (north star)
+The long-term ambition is enterprise-scale conversational AI — a design target of ~470B tokens/day (~5.4M tokens/sec). That target drives the *direction* (event-driven I/O, horizontally scalable stateless services, no synchronous REST on the hot path) but is **not** the current deployment. Today the system is a single-GPU prototype benchmarked on an RTX 3060 12GB. Build for that scaling direction, but do not assume scale-out infrastructure exists yet.
 
-## 3. What Things It Should Use (Tech Stack & Toolkit)
-- **Core Backend Orchestration:** Node.js. Used as the primary I/O multiplexer to handle thousands of concurrent persistent connections efficiently via its event-driven, non-blocking architecture. 
-- **Database:** PostgreSQL. Used for durable, relational storage of user metadata, session histories, and system configuration.
-- **Message Broking:** Apache Kafka. The backbone of the high-throughput pipeline. Used to decouple the Node.js API layer from the heavy GPU inference clusters, safely queuing millions of token events per second.
-- **Caching & State:** Redis. Used for ultra-low latency access to session states, rate limiting, and temporary buffering of active conversation context.
-- **Networking & Transport:** 
-  - **WebSockets:** For persistent, bidirectional, real-time binary audio streaming between the frontend client and the Node.js gateway.
-  - **gRPC:** For high-performance, strongly-typed internal microservice communication (e.g., between the Node.js orchestrator and the Python/C++ inference servers).
+## 3. Current Architecture (V3 — what actually exists)
 
-## 4. Global Agent Rules (System Prompts)
-*These constraints apply universally to all coding and architecture agents working on this repository.*
+> ⚠️ Agents: this section is ground truth. Sections 2 and 6's "future target" stack is aspirational and **not implemented** — do not write code against it without being asked.
 
-- **Event Loop Protection:** Under no circumstances should backend code block the Node.js Event Loop. CPU-intensive tasks (like heavy audio buffering or synchronous serialization) must be offloaded to worker threads or external services.
-- **Strict Stream Management:** Agents must heavily utilize Node.js Streams API for handling audio buffers. Never accumulate large raw audio files in memory; stream data directly from WebSockets to Kafka/gRPC.
-- **Memory Leak Vigilance:** At 5.4M tokens/sec, memory leaks are fatal. Agents must ensure all event listeners are properly removed, WebSocket connections are explicitly closed, and variables are scoped to allow immediate garbage collection.
-- **Resilient I/O Handling:** Network drops, malformed audio chunks, and Kafka backpressure are expected. Agents must implement graceful error handling—never crash the main process—and ensure application states recover cleanly from corrupted streams.
+End-to-end flow of one turn:
+```
+Browser (PCM16 100ms frames)
+  → Orchestrator (Node): energy gate (RMS) forwards voiced frames, signals silence
+    → STT service (faster-whisper, WebSocket :7003): partial + final transcripts
+  → Orchestrator: push to 10-turn history, then stream the LLM
+    → vLLM (Qwen2.5-0.5B-Instruct, OpenAI API :8000): token stream (SSE)
+  → Orchestrator: sentence buffer emits complete sentences
+    → TTS service (Kokoro-82M, HTTP :7002): length-prefixed PCM16 chunks
+  → Browser: AudioWorklet ring buffer → speaker (gapless, supports barge-in)
+```
+The three "decision points" where realtime feel is won/lost: **(1) the energy gate**, **(2) the STT finalize heuristic**, **(3) the sentence buffer**. See `docs/realtime-voice-roadmap.md` for the active plan to improve turn detection, context capture, and memory.
+
+**Current stack (real):**
+- **Orchestrator:** Node.js + TypeScript, WebSocket (`ws`). Dependency-light on purpose — only `dotenv` + `ws`. RabbitMQ, `node-vad`, and `openai` were removed; do not reintroduce them without cause.
+- **STT:** `faster-whisper` (CTranslate2) `medium` int8 on CUDA, streaming over WebSocket. `num_workers` for concurrency.
+- **LLM:** vLLM, OpenAI-compatible API, continuous batching, `stream: true`.
+- **TTS:** Kokoro-82M (PyTorch), streaming PCM16.
+- **Transport:** WebSocket (browser↔orchestrator, orchestrator↔STT) and HTTP/SSE (orchestrator↔vLLM/TTS). No gRPC, no Kafka.
+- **State:** in-memory per-session (`ClientSession`), including 10-turn conversation history. No Postgres/Redis yet.
+- **Services run on the GPU PC** (`REMOTE_IP`); the orchestrator may run elsewhere on the LAN. Don't assume colocation.
+
+**Future target stack (aspirational, NOT built):** Kafka for decoupling at scale, Postgres for durable session/user data, Redis for hot session state, gRPC for typed internal RPC, service replication behind a load balancer. Treat these as direction, not current dependencies.
+
+## 4. Repo Layout & Key Files
+- `orchestrator-service/` — Node hub. Hot files: `session/sessionManager.ts`, `vad/speechDetector.ts` (energy gate), `pipeline/voicePipeline.ts`, `pipeline/sentenceBuffer.ts`, `pipeline/vllmClient.ts`, `types/session.ts`.
+- `processing-engine/` — GPU services: `stt_service.py`, `tts-service.py`, `app/models/{stt,tts}.py`, `app/config.py`.
+- `client/` — browser client (`app.js`, `audio-playback-worklet.js`, `config.js`).
+- `benchmarks/` — `bench.py` + CSVs (`v1_bench.csv`, `v2_bench.csv`, `results.csv`).
+- `docs/realtime-voice-roadmap.md` — the current phased plan.
+
+## 5. Global Agent Rules
+*Apply to all coding/architecture work on this repo.*
+
+- **The GPU is the bottleneck, not Node.** The orchestrator is I/O-bound and far from saturating a core. Optimize GPU contention (batching, concurrency, fewer redundant inferences) before touching the orchestrator for "performance."
+- **Never block the Node event loop.** Offload CPU-heavy work; keep the audio path async and streaming. Don't accumulate whole utterances/responses in memory when you can stream.
+- **Keep the orchestrator dependency-light.** Two runtime deps today (`dotenv`, `ws`). Justify any addition.
+- **Stream, don't buffer-then-send.** STT, LLM, and TTS are all streaming; preserve the overlap (sentence N plays while N+1 is generated).
+- **Respect the three decision points.** Changes to turn-taking belong in the energy gate (`speechDetector.ts`) and STT finalize (`stt_service.py`); changes to first-audio latency often belong in the sentence buffer.
+- **Resilient I/O.** Network drops, malformed chunks, and disconnects are expected. Handle them gracefully; remove event listeners and close sockets to avoid leaks. Barge-in must always be able to abort an in-flight turn.
+- **Measure the right metric.** Optimize **end-of-speech → first audio** (perceived latency), not `TTFA-from-upload`. Validate changes with `benchmarks/bench.py --realtime`.
+- **Follow the roadmap.** Before architectural changes to turn detection / STT / memory, check `docs/realtime-voice-roadmap.md` and keep phases in order (fix upstream before downstream).
 
 <claude-mem-context>
 # Memory Context
