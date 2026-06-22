@@ -11,6 +11,7 @@ export function processAudioFrame(session: ClientSession, frame: Buffer): void {
     if (isVoice) {
         session.silenceFrames = 0;
         session.silenceSent = false;
+        session.lastVoiceAt = Date.now();
 
         if (session.sttSocket && session.sttSocket.readyState === session.sttSocket.OPEN) {
             session.sttSocket.send(frame);

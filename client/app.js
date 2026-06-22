@@ -1,7 +1,6 @@
 (function () {
   "use strict";
 
-  var DEFAULT_WS_URL = "ws://localhost:3000/ws/audio";
   var DEFAULT_TARGET_SAMPLE_RATE = 16000;
   var DEFAULT_FRAME_DURATION_MS = 100;
   var WORKLET_URL = "./audio-worklet.js";
@@ -11,7 +10,12 @@
   var PRE_BUFFER_SAMPLES = PLAYBACK_SAMPLE_RATE * 0.05; // 50ms pre-buffer.
 
   var config = window.VOICE_AI_CONFIG || {};
-  var websocketUrl = config.WS_URL || DEFAULT_WS_URL;
+  var websocketUrl = config.WS_URL || (function () {
+    // Derive from the page origin: http -> ws, https -> wss, same host/port.
+    var proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    var host = window.location.host || "localhost:3000";
+    return proto + "//" + host + "/ws/audio";
+  })();
   var targetSampleRate = config.TARGET_SAMPLE_RATE || DEFAULT_TARGET_SAMPLE_RATE;
   var frameDurationMs = config.FRAME_DURATION_MS || DEFAULT_FRAME_DURATION_MS;
 
@@ -444,7 +448,12 @@
   function assertBrowserSupport() {
     var AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!window.WebSocket) throw new Error("This browser does not support WebSockets.");
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("This browser cannot access microphone input.");
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      if (window.isSecureContext === false) {
+        throw new Error("Microphone blocked: this page is not a secure context. Open it via http://localhost or an HTTPS tunnel (ngrok/cloudflared). Plain http:// on a LAN IP or file:// is blocked by the browser.");
+      }
+      throw new Error("This browser cannot access microphone input.");
+    }
     if (!AudioContextClass) throw new Error("This browser does not support Web Audio.");
   }
 

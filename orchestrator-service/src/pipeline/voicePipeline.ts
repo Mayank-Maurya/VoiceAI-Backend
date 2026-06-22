@@ -30,6 +30,9 @@ export async function streamTurnToClient(
 
     const turnId = crypto.randomUUID();
     const startedAt = Date.now();
+    // Snapshot when the user actually stopped speaking (last voiced frame),
+    // captured now so a later barge-in frame can't move the reference.
+    const speechEndedAt = session.lastVoiceAt;
     let firstSentenceAt: number | null = null;
     let firstAudioAt: number | null = null;
     let sentenceCount = 0;
@@ -100,10 +103,17 @@ export async function streamTurnToClient(
     const ttfsMs = firstSentenceAt ? firstSentenceAt - startedAt : 0;
     const ttfaMs = firstAudioAt ? firstAudioAt - startedAt : 0;
 
+    // Perceived latency: speech-end -> first audio = endpointing + response.
+    //   endpoint = speech-end -> final transcript received (the STT lag)
+    //   response = final transcript -> first audio byte (LLM + TTS)
+    const endpointMs = speechEndedAt ? startedAt - speechEndedAt : 0;
+    const perceivedMs = firstAudioAt && speechEndedAt ? firstAudioAt - speechEndedAt : 0;
+
     console.log(
-        `[${session.id}] turn=${turnId} complete ` +
-        `TTFS=${ttfsMs}ms TTFA=${ttfaMs}ms ` +
-        `sentences=${sentenceCount} total=${totalMs}ms`
+        `[${session.id}] turn=${turnId} complete | ` +
+        `PERCEIVED=${perceivedMs}ms (speech-end -> first audio) = ` +
+        `endpoint=${endpointMs}ms + response=${ttfaMs}ms | ` +
+        `TTFS=${ttfsMs}ms sentences=${sentenceCount} total=${totalMs}ms`
     );
 }
 

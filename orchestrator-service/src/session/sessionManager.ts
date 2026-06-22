@@ -20,6 +20,7 @@ export function addConnection(socket: BrowserSocket): ClientSession {
         sttSocket: null,
         silenceFrames: 0,
         silenceSent: false,
+        lastVoiceAt: 0,
         history: [],
         turnAbort: null,
     };
