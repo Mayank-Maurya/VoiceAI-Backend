@@ -172,52 +172,48 @@ File: `processing-engine/tts-service.py`
 
 ## Setup
 
-Run the three GPU services on the GPU PC, the orchestrator anywhere on the LAN, and open the client
-in a browser.
+Run the GPU services on the GPU PC, the orchestrator anywhere on the LAN, and open the client in a
+browser.
 
-### 1. Start vLLM on the GPU PC
+### 1. GPU PC services — one command (Docker Compose, recommended)
 
-```bash
-docker rm -f voiceai-vllm
-
-docker run -d \
-  --name voiceai-vllm \
-  --runtime nvidia --gpus all \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
-  -p 8000:8000 --ipc=host \
-  vllm/vllm-openai:latest \
-  Qwen/Qwen2.5-0.5B-Instruct \
-  --host 0.0.0.0 --port 8000 \
-  --gpu-memory-utilization 0.45 \
-  --max-model-len 2048 \
-  --max-num-seqs 64
-```
-
-Check: `curl http://127.0.0.1:8000/v1/models`
-
-### 2. Start the STT service on the GPU PC
+All three GPU services (vLLM `:8000`, STT `:7003`, TTS `:7002`) are defined in
+`processing-engine/docker-compose.yml`. Requires the host to have the **NVIDIA Container Toolkit**.
 
 ```bash
 cd processing-engine
-pip install -r requirements.txt
-
-PYTHONPATH=. python3 stt_service.py
-# listens on 0.0.0.0:7003, WebSocket at /ws/stt
+docker compose up --build -d      # build + start all three
+docker compose ps                 # status / health
+docker compose logs -f stt        # follow a service
+docker compose down               # stop everything
 ```
 
-First run downloads the faster-whisper `medium` weights (~1.5 GB) and caches them under
-`~/.cache/huggingface`. Tune concurrency with `STT_NUM_WORKERS`.
+First start downloads the models (whisper, kokoro, smart-turn, Qwen) into a persistent `hf-cache`
+volume, so it's slow once and fast thereafter. Health: `curl http://localhost:7003/health` and
+`:7002/health`; vLLM: `curl http://localhost:8000/v1/models`.
 
-### 3. Start the TTS service on the GPU PC
+Common tweaks live as env in the compose file: `STT_NUM_WORKERS`, `TURN_DETECTION`, the vLLM
+`--gpu-memory-utilization`, and `STT_DEVICE=cpu` as a fallback if a container hits a cuDNN mismatch.
+
+### 2. (Alternative) Run the GPU services manually
+
+Without Docker — three terminals on the GPU PC (vLLM via its own container, STT/TTS via Python):
 
 ```bash
-cd processing-engine
+# vLLM
+docker run -d --name voiceai-vllm --runtime nvidia --gpus all \
+  -v ~/.cache/huggingface:/root/.cache/huggingface -p 8000:8000 --ipc=host \
+  vllm/vllm-openai:latest Qwen/Qwen2.5-0.5B-Instruct \
+  --host 0.0.0.0 --port 8000 --gpu-memory-utilization 0.45 --max-model-len 2048 --max-num-seqs 64
 
-PYTHONPATH=. python3 tts-service.py
-# listens on 0.0.0.0:7002, endpoint POST /tts/stream
+# STT  (port 7003)
+cd processing-engine && pip install -r requirements.txt && PYTHONPATH=. python3 stt_service.py
+
+# TTS  (port 7002)
+cd processing-engine && PYTHONPATH=. python3 tts-service.py
 ```
 
-### 4. Start the orchestrator
+### 3. Start the orchestrator
 
 ```bash
 cd orchestrator-service
@@ -246,7 +242,7 @@ HTTP server listening on http://localhost:3000
 WebSocket endpoint ready at ws://localhost:3000/ws/audio
 ```
 
-### 5. Open the client
+### 4. Open the client
 
 Set the WebSocket target in `client/config.js`, then serve the folder:
 

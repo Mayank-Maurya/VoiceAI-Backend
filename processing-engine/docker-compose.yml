@@ -1,0 +1,83 @@
+# GPU-PC processing services: vLLM (:8000), STT (:7003), TTS (:7002).
+#
+#   docker compose up --build -d     # build + start everything
+#   docker compose logs -f stt       # follow one service's logs
+#   docker compose ps                # status / health
+#   docker compose down              # stop everything
+#
+# Run the Node orchestrator separately (on your Mac / LAN) with REMOTE_IP set to
+# this machine's IP. Requires the NVIDIA Container Toolkit on the host.
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    <<: *gpu
+    ipc: host
+    ports:
+      - "8000:8000"
+    volumes:
+      # Reuse the host's HF cache so the model isn't re-downloaded.
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    command:
+      - Qwen/Qwen2.5-0.5B-Instruct
+      - --host=0.0.0.0
+      - --port=8000
+      - --gpu-memory-utilization=0.45
+      - --max-model-len=2048
+      - --max-num-seqs=64
+    restart: unless-stopped
+
+  stt:
+    build: .
+    image: voiceai-processing:latest
+    <<: *gpu
+    ports:
+      - "7003:7003"
+    environment:
+      - HF_HOME=/models/huggingface
+      - STT_NUM_WORKERS=4
+      - TURN_DETECTION=on
+      # - STT_DEVICE=cpu          # fallback if GPU ctranslate2/cuDNN misbehaves
+    volumes:
+      - hf-cache:/models/huggingface
+    command: python stt_service.py
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7003/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s   # first run downloads whisper + smart-turn models
+
+  tts:
+    build: .
+    image: voiceai-processing:latest
+    <<: *gpu
+    ports:
+      - "7002:7002"
+    environment:
+      - HF_HOME=/models/huggingface
+    volumes:
+      - hf-cache:/models/huggingface
+    command: python tts-service.py
+    restart: unless-stopped
+    depends_on:
+      - stt   # let the shared image build once before tts starts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7002/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+
+volumes:
+  hf-cache:   # persists downloaded models (whisper, kokoro, smart-turn) across rebuilds

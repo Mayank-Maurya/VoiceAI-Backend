@@ -4,3 +4,4 @@ soundfile==0.12.1
 numpy>=1.26,<2.0
 kokoro
 faster-whisper
+transformers
