@@ -17,10 +17,18 @@ x-gpu: &gpu
             count: all
             capabilities: [gpu]
 
+# Compose's user-defined network can't always reach the host's DNS resolver,
+# which breaks model downloads from huggingface.co. Pin a public resolver.
+# Swap for your router/internal DNS if 8.8.8.8 is blocked on your network.
+x-dns: &dns
+  - 8.8.8.8
+  - 1.1.1.1
+
 services:
   vllm:
     image: vllm/vllm-openai:latest
     <<: *gpu
+    dns: *dns
     ipc: host
     ports:
       - "8000:8000"
@@ -40,6 +48,7 @@ services:
     build: .
     image: voiceai-processing:latest
     <<: *gpu
+    dns: *dns
     ports:
       - "7003:7003"
     environment:
@@ -62,6 +71,7 @@ services:
     build: .
     image: voiceai-processing:latest
     <<: *gpu
+    dns: *dns
     ports:
       - "7002:7002"
     environment:
