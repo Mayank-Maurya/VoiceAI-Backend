@@ -5,3 +5,4 @@ numpy>=1.26,<2.0
 kokoro
 faster-whisper
 transformers
+onnxruntime
