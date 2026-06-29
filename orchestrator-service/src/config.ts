@@ -19,6 +19,11 @@ export const VAD_FRAME_BYTES = VAD_FRAME_SAMPLES * BYTES_PER_SAMPLE;
 
 export const RMS_SPEECH_THRESHOLD = Number(process.env.RMS_SPEECH_THRESHOLD ?? 600);
 
+// After speech stops, keep forwarding this many silence frames (~100ms each) to
+// the STT so the buffer carries the speaker's trailing acoustics. Smart Turn
+// needs that trailing context to tell "done" from "just pausing".
+export const SILENCE_TAIL_FRAMES = Number(process.env.SILENCE_TAIL_FRAMES ?? 8);
+
 // --- Downstream services ---
 export const VLLM_BASE_URL = process.env.VLLM_BASE_URL ?? `http://${REMOTE_IP}:8000`;
 export const TTS_STREAM_URL = process.env.TTS_STREAM_URL ?? `http://${REMOTE_IP}:7002`;

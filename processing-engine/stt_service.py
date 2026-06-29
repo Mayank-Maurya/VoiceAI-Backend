@@ -197,16 +197,20 @@ async def stt_websocket(ws: WebSocket):
                 float32 = pcm16.astype(np.float32) / 32768.0
                 audio_buffer = np.concatenate([audio_buffer, float32])
                 has_audio = True
-                # User is talking; cancel any pending finalize and re-arm the
-                # turn check for the next pause.
-                silence_signaled = False
-                turn_consulted = False
-                turn_incomplete = False
+                # Do NOT touch silence state here: incoming bytes may be the
+                # trailing-silence tail the orchestrator forwards for the turn
+                # model. Resumption is signaled explicitly via {"speech": true}.
 
             elif "text" in msg and msg["text"]:
                 try:
                     control = json.loads(msg["text"])
-                    if control.get("silence") and not silence_signaled:
+                    if control.get("speech"):
+                        # Explicit resume from the energy gate — cancel any
+                        # pending finalize and re-arm the turn check.
+                        silence_signaled = False
+                        turn_consulted = False
+                        turn_incomplete = False
+                    elif control.get("silence") and not silence_signaled:
                         silence_signaled = True
                         silence_at = time.monotonic()
                 except json.JSONDecodeError:
