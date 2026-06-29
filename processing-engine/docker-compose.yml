@@ -36,12 +36,15 @@ services:
       # Reuse the host's HF cache so the model isn't re-downloaded.
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
     command:
-      - Qwen/Qwen2.5-0.5B-Instruct
+      # Phase 4: 3B model for genuinely contextual replies. ~6GB bf16 weights;
+      # util 0.65 (~7.8GB) leaves room for STT (~0.8GB) + TTS (~0.2GB) on a 12GB
+      # card. If it OOMs, lower util or use Qwen/Qwen2.5-3B-Instruct-AWQ (int4).
+      - Qwen/Qwen2.5-3B-Instruct
       - --host=0.0.0.0
       - --port=8000
-      - --gpu-memory-utilization=0.45
-      - --max-model-len=2048
-      - --max-num-seqs=64
+      - --gpu-memory-utilization=0.65
+      - --max-model-len=4096
+      - --max-num-seqs=16
     restart: unless-stopped
 
   stt:

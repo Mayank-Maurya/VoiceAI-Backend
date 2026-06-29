@@ -21,6 +21,11 @@ export async function streamTurnToClient(
     session: ClientSession,
     userText: string,
 ): Promise<void> {
+    // Guard: never barge-in over a live reply or commit an empty turn to history.
+    if (!userText || !userText.trim()) {
+        return;
+    }
+
     if (session.turnAbort) {
         cancelCurrentTurn(session);
     }

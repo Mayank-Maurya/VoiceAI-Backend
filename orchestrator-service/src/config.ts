@@ -25,16 +25,20 @@ export const RMS_SPEECH_THRESHOLD = Number(process.env.RMS_SPEECH_THRESHOLD ?? 6
 export const SILENCE_TAIL_FRAMES = Number(process.env.SILENCE_TAIL_FRAMES ?? 8);
 
 // --- Downstream services ---
-export const VLLM_BASE_URL = process.env.VLLM_BASE_URL ?? `http://${REMOTE_IP}:8000`;
+export const VLLM_BASE_URL = process.env.VLLM_BASE_URL ?? `http://${REMOTE_IP}:8001`;
 export const TTS_STREAM_URL = process.env.TTS_STREAM_URL ?? `http://${REMOTE_IP}:7002`;
 export const STT_WS_URL = process.env.STT_WS_URL ?? `ws://${REMOTE_IP}:7003`;
 
 export const VLLM_MODEL_ID =
-    process.env.VLLM_MODEL_ID ?? "Qwen/Qwen2.5-0.5B-Instruct";
+    process.env.VLLM_MODEL_ID ?? "Qwen/Qwen2.5-3B-Instruct";
 
 export const LLM_MAX_NEW_TOKENS = Number(process.env.LLM_MAX_NEW_TOKENS ?? 256);
 export const LLM_TEMPERATURE = Number(process.env.LLM_TEMPERATURE ?? 0.6);
 
 export const LLM_SYSTEM_PROMPT =
     process.env.LLM_SYSTEM_PROMPT ??
-    "You are a helpful, conversational voice assistant. Keep answers brief, natural, and spoken-word friendly. Do not use markdown, emojis, or lists.";
+    "You are Aria, a warm and friendly voice assistant in a live spoken conversation. " +
+    "Reply in one or two short sentences, the way a person actually talks. Use the earlier " +
+    "conversation to stay on topic and refer back to what the user said. Never say you are an " +
+    "AI language model or that you lack feelings — just answer naturally and personably. Do not " +
+    "use markdown, emojis, lists, or special formatting; your reply will be spoken aloud.";

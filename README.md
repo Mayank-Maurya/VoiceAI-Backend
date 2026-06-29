@@ -159,7 +159,8 @@ File: `processing-engine/stt_service.py`
 Serves the LLM with continuous batching over an OpenAI-compatible HTTP API. The orchestrator calls
 `/v1/chat/completions` with `stream: true`.
 
-Default model: `Qwen/Qwen2.5-0.5B-Instruct`.
+Default model: `Qwen/Qwen2.5-3B-Instruct` (≈6 GB bf16; upgraded from 0.5B in Phase 4 for
+contextual, natural replies — there's VRAM headroom on a 12 GB card).
 
 ### TTS Service (`:7002`)
 
@@ -200,11 +201,12 @@ Common tweaks live as env in the compose file: `STT_NUM_WORKERS`, `TURN_DETECTIO
 Without Docker — three terminals on the GPU PC (vLLM via its own container, STT/TTS via Python):
 
 ```bash
-# vLLM
+# vLLM  (Qwen2.5-3B-Instruct, ~6GB bf16. If it OOMs alongside STT+TTS, lower
+# --gpu-memory-utilization or use Qwen/Qwen2.5-3B-Instruct-AWQ for an int4 build.)
 docker run -d --name voiceai-vllm --runtime nvidia --gpus all \
-  -v ~/.cache/huggingface:/root/.cache/huggingface -p 8000:8000 --ipc=host \
-  vllm/vllm-openai:latest Qwen/Qwen2.5-0.5B-Instruct \
-  --host 0.0.0.0 --port 8000 --gpu-memory-utilization 0.45 --max-model-len 2048 --max-num-seqs 64
+  -v ~/.cache/huggingface:/root/.cache/huggingface -p 8001:8001 --ipc=host \
+  vllm/vllm-openai:latest Qwen/Qwen2.5-3B-Instruct \
+  --host 0.0.0.0 --port 8001 --gpu-memory-utilization 0.65 --max-model-len 4096 --max-num-seqs 16
 
 # STT  (port 7003)
 cd processing-engine && pip install -r requirements.txt && PYTHONPATH=. python3 stt_service.py
@@ -230,9 +232,10 @@ RMS_SPEECH_THRESHOLD=600
 # STT_WS_URL=ws://192.168.1.6:7003
 # TTS_STREAM_URL=http://192.168.1.6:7002
 # VLLM_BASE_URL=http://192.168.1.6:8000
-VLLM_MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct
+VLLM_MODEL_ID=Qwen/Qwen2.5-3B-Instruct   # must match the model vLLM serves
 LLM_MAX_NEW_TOKENS=256
 LLM_TEMPERATURE=0.6
+# LLM_SYSTEM_PROMPT=...                   # persona/brevity prompt (see config.ts default)
 ```
 
 Wait for:
