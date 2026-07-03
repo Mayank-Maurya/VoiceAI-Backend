@@ -37,11 +37,12 @@ comes from streaming overlap plus deleting the 800 ms VAD hangover, not from a h
 ### Highlights
 
 - **Fully streaming voice loop** over a single WebSocket — energy-gated audio → streaming STT → streaming LLM (SSE) → sentence-buffered streaming TTS → gapless browser playback.
-- **No VAD model** — a simple RMS energy gate forwards audio to the STT service and signals silence; the STT decides utterance boundaries from transcript stability.
+- **Semantic turn-taking** — Smart Turn v3 (ONNX, on CPU) decides when you're *actually* done vs. just pausing, so it doesn't cut you off mid-thought.
+- **Tone awareness** — a speech-emotion model tags each utterance (happy/angry/sad/…) and feeds it to the LLM so replies can be empathetic (a soft signal — see Scope & Production Gap).
 - **Barge-in** — speak while the assistant is talking and the current turn is cancelled mid-stream (LLM + TTS aborted, browser playback stopped).
 - **Conversation memory** — last 10 turns are passed to the LLM each turn.
-- **vLLM** serving the LLM via an OpenAI-compatible API with continuous batching.
-- **Designed for one GPU PC** — three lightweight services (~5 GB VRAM total on a 12 GB card), no duplicate model copies.
+- **Pluggable TTS** — local Kokoro-82M by default, or cloud ElevenLabs via one env var, behind a single streaming interface.
+- **Designed for one GPU PC** — Qwen2.5-3B + STT + TTS coexist on a 12 GB card; turn/emotion models run on CPU.
 
 ## Target Machine
 
@@ -289,6 +290,47 @@ needs to detect utterance boundaries. CSVs: `v1_bench.csv`, `v2_bench.csv`, `res
 > Note: because V3 can begin responding *before* the upload finishes, the benchmark's
 > "end-of-upload" timing reference understates TTFA in some rows. The honest single-turn TTFA is
 > ~165 ms. Endpointing tuning (avoiding early finalization on mid-sentence pauses) is in progress.
+
+## Scope & Production Gap
+
+This is a **learning project and portfolio piece**, not a product — and that distinction is
+deliberate. A working prototype is weeks of work; a product is years. The line was drawn on
+purpose at *"a real-time voice agent that genuinely feels real to talk to, running on one 12 GB
+GPU."* Everything needed to hit that bar is built:
+
+- Fully streaming STT → LLM → TTS with sub-second perceived latency
+- Semantic turn-taking (Smart Turn v3), so it doesn't cut you off mid-thought
+- Conversation memory, barge-in, and tone/emotion awareness
+- Pluggable TTS (local Kokoro ↔ cloud ElevenLabs) and a one-command Docker setup
+
+What was **intentionally NOT built** — this is the part that separates a demo from a product, and
+each of these is a project in itself:
+
+- **Horizontal scale-out** — the 470B-tokens/day vision (Kafka/queues, load-balanced GPU worker
+  pools, autoscaling). The services are stateless-per-request so it's *designed* for this, but the
+  infra isn't here.
+- **Persistence & multi-tenancy** — Postgres/Redis, user accounts, auth, per-user session history.
+- **Telephony** — SIP/PSTN, so it can answer a phone call.
+- **Production hardening** — observability/metrics/tracing, security, rate limiting, SLAs,
+  graceful degradation, load testing beyond the included harness.
+- **Robust affect detection** — the current SER is a trained-on-acted-emotion model, so tone is a
+  *soft, noisy signal* good for a demo and an LLM nudge, not production-grade emotion analysis.
+
+Knowing where to stop is the point. Pushing past this line turns "months" into "years."
+
+## Future Ideas
+
+Directions this could grow, if it ever became a product (recorded here so the ambition is on the
+record without building it):
+
+- **Scale-out tier** — reintroduce a queue + replicated GPU workers behind a load balancer; a
+  Go/Rust edge for raw connection density.
+- **Better affect** — a stronger SER (or an audio-LLM) trained on real conversational speech, plus
+  emotion-conditioned TTS so the agent's *voice* mirrors the mood.
+- **Streaming-native ASR** — replace polled Whisper with a true streaming transducer for even
+  lower endpointing latency.
+- **Function calling / tools & RAG** — let the agent actually *do* things and answer from grounded
+  knowledge, not just chat.
 
 ## Troubleshooting
 

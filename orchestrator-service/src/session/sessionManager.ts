@@ -46,14 +46,15 @@ function connectStt(session: ClientSession): void {
             const msg = JSON.parse(data.toString());
 
             if (msg.is_final && msg.text) {
-                console.log(`[${session.id}] USER: ${msg.text}`);
+                const tone = msg.emotion ? ` (${msg.emotion})` : "";
+                console.log(`[${session.id}] USER${tone}: ${msg.text}`);
 
                 if (session.turnAbort) {
                     console.log(`[${session.id}] Barge-in detected, cancelling current turn`);
                     cancelCurrentTurn(session);
                 }
 
-                streamTurnToClient(session, msg.text).catch((err) => {
+                streamTurnToClient(session, msg.text, msg.emotion).catch((err) => {
                     console.error(`[${session.id}] Pipeline error:`, err);
                 });
             } else if (msg.text) {

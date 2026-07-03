@@ -17,6 +17,7 @@ from fastapi.concurrency import run_in_threadpool
 
 from app.models.stt import SttRuntime
 from app.models.turn_detector import TurnDetector
+from app.models.emotion_detector import EmotionDetector
 
 STT_PORT = int(os.getenv("STT_PORT", "7003"))
 SAMPLE_RATE = 16000
@@ -42,12 +43,14 @@ TURN_WINDOW_SAMPLES = SAMPLE_RATE * 8
 
 runtime = SttRuntime()
 turn_detector = TurnDetector()
+emotion_detector = EmotionDetector()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await run_in_threadpool(runtime.load)
     await run_in_threadpool(turn_detector.load)
+    await run_in_threadpool(emotion_detector.load)
     yield
 
 
@@ -61,6 +64,7 @@ async def health():
         "model": "faster-whisper",
         "loaded": runtime.model is not None,
         "turn_detection": turn_detector.available,
+        "emotion_detection": emotion_detector.available,
     }
 
 
@@ -109,13 +113,20 @@ async def stt_websocket(ws: WebSocket):
             snap_len = len(audio_buffer)
             snapshot = audio_buffer[:snap_len].copy()
 
-            # beam_size=5 on the final pass for accuracy (it's one decode per
-            # turn, so the latency cost is fine). Partials stay at beam 1.
-            text = await run_in_threadpool(runtime.transcribe_buffer, snapshot, 5)
+            # Transcribe (beam 5 for accuracy) and detect emotion concurrently on
+            # the same audio, so SER adds no latency to the turn.
+            text, emotion = await asyncio.gather(
+                run_in_threadpool(runtime.transcribe_buffer, snapshot, 5),
+                run_in_threadpool(emotion_detector.detect, snapshot),
+            )
             text = (text or last_partial).strip()
 
             if text:
-                await ws.send_json({"text": text, "is_final": True})
+                payload = {"text": text, "is_final": True}
+                if emotion:
+                    payload["emotion"] = emotion[0]
+                    payload["emotion_score"] = round(emotion[1], 2)
+                await ws.send_json(payload)
 
             # Keep any audio that streamed in while we were decoding.
             audio_buffer = audio_buffer[snap_len:]

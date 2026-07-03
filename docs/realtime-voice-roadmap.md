@@ -136,23 +136,72 @@ replies feel disconnected.
 **Done when:** it correctly answers follow-ups that depend on something said two
 turns earlier.
 
-## Phase 5 — Naturalness polish  (later · deferred)
+## Phase 5 — Naturalness (voice) — DONE
 
-Voice timbre / prosody: Kokoro ceiling, crossfade chunk boundaries, first-clause
-TTS. Deferred per decision — understanding and turn-taking come first.
+Made TTS a **pluggable backend** instead of chasing Kokoro's ceiling:
+- `KokoroProvider` (local, default) and `ElevenLabsProvider` (cloud, most natural)
+  behind one interface, both emitting length-prefixed PCM16 @ 24 kHz.
+- Selected at startup via `TTS_PROVIDER` + `ELEVENLABS_API_KEY`; cloud mode frees
+  Kokoro's VRAM; auto-falls back to Kokoro if no key. No orchestrator/client change.
+
+## Phase 6 — Emotion / tone awareness  (final feature, ~½ day)
+
+Give the agent a sense of *how* the user said something, not just the words.
+Mirrors the Smart Turn integration (separate model in the STT service, CPU, safe
+fallback — nothing in the hot path can break).
+
+- **`app/models/emotion_detector.py`** — `EmotionDetector` loading a Speech
+  Emotion Recognition (SER) model on CPU. Candidate: `superb/wav2vec2-base-superb-er`
+  (small, standard HF audio-classification: neutral/happy/angry/sad) or
+  `ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition` (8 emotions). Returns
+  `{label, score}` or `None` on failure.
+- **`stt_service.py`** — on finalize, run SER on the same utterance snapshot and
+  attach to the final message: `{"text": ..., "is_final": true, "emotion": "...",
+  "emotion_score": 0.x}`. Env: `EMOTION_DETECTION=on|off`, `EMOTION_MODEL=...`.
+- **Orchestrator** — read `msg.emotion` and inject it into the LLM context (e.g. a
+  short note "the user sounds {emotion}") so replies can be empathetic. Wire through
+  `sessionManager.ts` → `streamTurnToClient`.
+- **Stretch (optional):** modulate the TTS by emotion (ElevenLabs `voice_settings`
+  style/stability). Skip for closure unless trivial.
+
+**Reality check:** SER models are trained mostly on *acted* emotion, so on real
+conversational speech this is a **soft, noisy signal** — great for a demo "wow" and
+to nudge the LLM, not production-grade affect detection. Treat/label it as such.
+
+**Done when:** speaking in an obviously frustrated/happy tone visibly changes how
+the agent responds.
 
 ---
 
-## Recommended sequence
+## Status
 
-1. **First push:** Phase 0 → 1 → 2. Directly kills "it doesn't stop when I'm
-   done"; this is the core of feeling real. Phase 2 is the centerpiece; 0–1 make
-   it measurable and stop the bleeding cheaply first.
-2. **Second push:** Phase 3 → 4. Makes it understand and actually answer well.
-3. **Later:** Phase 5 (voice quality).
+Phases **0–5 DONE**. Phase 6 is the last feature, then the project closes.
 
 ## Guiding metric
 
 Optimize **end-of-speech → first audio** (perceived latency), not
-`TTFA-from-upload`. Target: well under ~500 ms for the agent to start replying,
-with turn detection that doesn't cut the user off.
+`TTFA-from-upload`. Target: well under ~500 ms to start replying, without cutting
+the user off.
+
+---
+
+## Project Closure (definition of done)
+
+This is a **learning project + portfolio piece**, not a product. Close it here —
+do NOT slide into product scope (that's the "years" trap).
+
+Closure checklist:
+1. ☑ Phase 6 (emotion) implemented — verify it visibly changes replies.
+2. ☐ One verification pass — a real multi-turn conversation *feels* real (turn-taking,
+   memory, natural voice, emotion).
+3. ☐ Record a 60–90s demo (the single most valuable portfolio artifact).
+4. ☐ README: add a **"Scope & Production Gap"** section — what was intentionally
+   NOT built and why (k8s/Kafka/Postgres/Redis scaling, telephony, auth,
+   multi-tenancy, observability, richer SER). This paragraph signals senior judgment.
+5. ☐ README: a short **"Future ideas"** list (production affect detection, streaming
+   TTS emotion, horizontal scale-out) so the ambition is on record without building it.
+6. ☐ Tag a release (`v3.0`) + final commit. **Closed.**
+
+**Out of scope forever (product territory):** horizontal scaling infra, telephony/SIP,
+auth/accounts/multi-tenancy, production observability/security/SLAs, the literal
+470B-tokens/day stack.

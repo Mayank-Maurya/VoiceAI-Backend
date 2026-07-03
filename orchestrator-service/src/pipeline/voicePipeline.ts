@@ -6,6 +6,26 @@ import { sentenceBuffer } from "./sentenceBuffer";
 
 const MAX_HISTORY_TURNS = 10;
 
+// Map a detected user emotion to a spoken tone tag for emotion-capable TTS
+// (rumik). Mirror positive energy; soften negatives to a calm, empathetic voice.
+// Providers that don't support tags simply ignore it.
+function mapEmotionToTone(emotion?: string): string | undefined {
+    if (!emotion) return undefined;
+    switch (emotion.toLowerCase()) {
+        case "happy": return "happy";
+        case "excited":
+        case "surprised": return "excited";
+        case "sad":
+        case "angry":
+        case "frustrated":
+        case "fearful":
+        case "disgust": return "calm";
+        case "neutral":
+        case "calm": return "neutral";
+        default: return undefined;
+    }
+}
+
 export function cancelCurrentTurn(session: ClientSession): void {
     if (session.turnAbort) {
         session.turnAbort.abort();
@@ -20,6 +40,7 @@ export function cancelCurrentTurn(session: ClientSession): void {
 export async function streamTurnToClient(
     session: ClientSession,
     userText: string,
+    emotion?: string,
 ): Promise<void> {
     // Guard: never barge-in over a live reply or commit an empty turn to history.
     if (!userText || !userText.trim()) {
@@ -51,6 +72,15 @@ export async function streamTurnToClient(
         ...session.history.slice(-MAX_HISTORY_TURNS * 2),
     ];
 
+    // Annotate ONLY this turn's copy with the detected tone — a fresh object so
+    // the stored history stays clean (no emotion tags accumulating in memory).
+    if (emotion) {
+        messages[messages.length - 1] = {
+            role: "user",
+            content: `${userText}\n\n[The user sounds ${emotion}. Respond with fitting empathy; do not mention that you detected their tone.]`,
+        };
+    }
+
     const sendAudioStart = () => {
         if (audioStartSent || abort.signal.aborted) return;
         audioStartSent = true;
@@ -62,6 +92,8 @@ export async function streamTurnToClient(
             }));
         }
     };
+
+    const tone = mapEmotionToTone(emotion);
 
     console.log(`[${session.id}] turn=${turnId} streaming LLM+TTS for: "${userText}"`);
 
@@ -77,7 +109,7 @@ export async function streamTurnToClient(
             }
             console.log(`[${session.id}] turn=${turnId} TTS sentence ${sentenceCount}: "${sentence}"`);
 
-            await streamTtsToClient(session, sentence, abort.signal, () => {
+            await streamTtsToClient(session, sentence, tone, abort.signal, () => {
                 sendAudioStart();
                 if (firstAudioAt === null) {
                     firstAudioAt = Date.now();
@@ -125,13 +157,14 @@ export async function streamTurnToClient(
 async function streamTtsToClient(
     session: ClientSession,
     text: string,
+    tone: string | undefined,
     signal: AbortSignal,
     onFirstChunk: () => void,
 ): Promise<void> {
     const response = await fetch(`${TTS_STREAM_URL}/tts/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, tone }),
         signal,
     });
 

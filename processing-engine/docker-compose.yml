@@ -58,6 +58,8 @@ services:
       - HF_HOME=/models/huggingface
       - STT_NUM_WORKERS=4
       - TURN_DETECTION=on
+      - EMOTION_DETECTION=on
+      # - EMOTION_MODEL=ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition  # 8 emotions
       # - STT_DEVICE=cpu          # fallback if GPU ctranslate2/cuDNN misbehaves
     volumes:
       - hf-cache:/models/huggingface
@@ -79,6 +81,23 @@ services:
       - "7002:7002"
     environment:
       - HF_HOME=/models/huggingface
+      # Backend: "kokoro" (local, default), "rumik" or "elevenlabs" (cloud).
+      # Set these in a processing-engine/.env file (git-ignored) — do NOT commit
+      # API keys. Selecting a cloud provider with its key set switches to it;
+      # an unset/absent key falls back to Kokoro automatically.
+      - TTS_PROVIDER=${TTS_PROVIDER:-kokoro}
+      # rumik.ai Silk (streams PCM16 @ 24kHz):
+      - RUMIK_API_KEY=${RUMIK_API_KEY:-}
+      - RUMIK_MODEL=${RUMIK_MODEL:-mulberry}
+      - RUMIK_SPEAKER=${RUMIK_SPEAKER:-speaker_1}
+      - RUMIK_DESCRIPTION=${RUMIK_DESCRIPTION:-}
+      # Speak replies with the detected emotion via rumik [tone] tags. Off if
+      # rumik voices unrecognized tags literally.
+      - RUMIK_EMOTION_TAGS=${RUMIK_EMOTION_TAGS:-on}
+      # ElevenLabs:
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-21m00Tcm4TlvDq8ikWAM}
+      - ELEVENLABS_MODEL=${ELEVENLABS_MODEL:-eleven_flash_v2_5}
     volumes:
       - hf-cache:/models/huggingface
     command: python tts-service.py
