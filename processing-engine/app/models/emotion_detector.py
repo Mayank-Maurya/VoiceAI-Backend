@@ -26,6 +26,9 @@ MAX_SAMPLES = SAMPLE_RATE * MAX_SECONDS
 MIN_SAMPLES = SAMPLE_RATE // 2  # <0.5s is too short to judge tone
 
 EMOTION_MODEL = os.getenv("EMOTION_MODEL", "superb/wav2vec2-base-superb-er")
+# SER models skew heavily to "neutral". If the top non-neutral emotion clears
+# this confidence, surface it instead of a bland neutral. Tune per model/mic.
+NEUTRAL_OVERRIDE_CONF = float(os.getenv("EMOTION_NEUTRAL_OVERRIDE", "0.3"))
 
 # Normalize common SER label abbreviations to plain words the LLM understands.
 LABEL_MAP = {
@@ -98,6 +101,11 @@ class EmotionDetector:
             print(f"[emotion] {[(lbl(i), round(float(probs[i]), 2)) for i in order[:3]]}", flush=True)
 
             best = int(order[0])
+            # Prefer a confident non-neutral emotion over a neutral-heavy default.
+            if lbl(best) == "neutral" and len(order) > 1:
+                second = int(order[1])
+                if float(probs[second]) >= NEUTRAL_OVERRIDE_CONF:
+                    best = second
             return lbl(best), float(probs[best])
         except Exception as exc:  # noqa: BLE001
             print(f"Emotion detection error ({exc}); omitting tone.", flush=True)
