@@ -68,6 +68,17 @@ class EmotionDetector:
         try:
             torch = self._torch
             audio = np.asarray(audio_np, dtype=np.float32)[-MAX_SAMPLES:]
+
+            # Trim trailing near-silence (the endpointing tail) so it doesn't
+            # dilute the emotion toward "neutral".
+            absa = np.abs(audio)
+            if absa.size:
+                thresh = max(0.01, float(absa.max()) * 0.1)
+                voiced = np.where(absa > thresh)[0]
+                if voiced.size:
+                    end = min(len(audio), int(voiced[-1]) + SAMPLE_RATE // 10)
+                    audio = audio[:end]
+
             if len(audio) < MIN_SAMPLES:
                 return None
 
@@ -76,11 +87,18 @@ class EmotionDetector:
             )
             with torch.no_grad():
                 logits = self.model(**inputs).logits
-                probs = torch.softmax(logits, dim=-1)[0]
+                probs = torch.softmax(logits, dim=-1)[0].cpu().numpy()
 
-            idx = int(probs.argmax().item())
-            raw = str(self.model.config.id2label[idx]).lower()
-            return LABEL_MAP.get(raw, raw), float(probs[idx].item())
+            def lbl(i: int) -> str:
+                raw = str(self.model.config.id2label[int(i)]).lower()
+                return LABEL_MAP.get(raw, raw)
+
+            order = np.argsort(probs)[::-1]
+            # Log the full distribution so we can see close calls vs. real neutral.
+            print(f"[emotion] {[(lbl(i), round(float(probs[i]), 2)) for i in order[:3]]}", flush=True)
+
+            best = int(order[0])
+            return lbl(best), float(probs[best])
         except Exception as exc:  # noqa: BLE001
             print(f"Emotion detection error ({exc}); omitting tone.", flush=True)
             return None
