@@ -58,8 +58,14 @@ services:
       - HF_HOME=/models/huggingface
       - STT_NUM_WORKERS=4
       - TURN_DETECTION=on
-      - EMOTION_DETECTION=on
-      # - EMOTION_MODEL=ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition  # 8 emotions
+      - EMOTION_DETECTION=${EMOTION_DETECTION:-on}
+      # Default is 4-class and a bit neutral-heavy. For a stronger clean-loading
+      # model, set EMOTION_MODEL in processing-engine/.env, e.g.:
+      #   EMOTION_MODEL=superb/hubert-large-superb-er
+      # AVOID ehcalabres/wav2vec2-lg-xlsr-...: its custom head loads as RANDOM
+      # weights under the standard class (see load report) -> garbage predictions.
+      - EMOTION_MODEL=${EMOTION_MODEL:-superb/wav2vec2-base-superb-er}
+      - EMOTION_NEUTRAL_OVERRIDE=${EMOTION_NEUTRAL_OVERRIDE:-0.3}
       # - STT_DEVICE=cpu          # fallback if GPU ctranslate2/cuDNN misbehaves
     volumes:
       - hf-cache:/models/huggingface
